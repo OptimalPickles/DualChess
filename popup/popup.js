@@ -1,10 +1,22 @@
-// flow: scrape tab -> get/ask primary -> figure out mode -> stats + head-to-head -> render
+// flow: scrape tab -> get/ask primary -> figure out mode -> refresh() every 60s: stats -> performance -> head-to-head
 // logs start with "[Performance]". popup logs: right-click icon > Inspect popup.
 // scrapeChessPage logs show in the chess.com tab's own console
 
 // Key used in chrome.storage.local to remember "you" between popup opens
 const STORAGE_KEY_PRIMARY_USERNAME = "primaryUsername";
 const RECENT_GAMES_SHOWN = 5;
+const SETTINGS_KEY = "perfSettings";
+const DEFAULT_SETTINGS = { time: "auto", range: "games:20", rated: "all" };
+const SESSION_RANGE = { type: "session" };
+const REFRESH_MS = 60 * 1000;
+const MAX_BACKOFF_MS = 5 * 60 * 1000;
+
+// what init() found, reused by every refresh
+let current = null;
+// bumped on every refresh. an older one that finishes late doesn't render
+let refreshGen = 0;
+let refreshTimer = null;
+let refreshDelay = REFRESH_MS;
 
 // runs inside the chess.com tab, can't use anything outside this function
 function scrapeChessPage() {
@@ -85,7 +97,7 @@ function scrapeChessPage() {
       addCandidate(el.textContent);
     });
 
-  const result = { playersOnPage: Array.from(candidates.values()) };
+  const result = { playersOnPage: Array.from(candidates.values()), canonicalHref };
   console.log("[Performance] scrapeChessPage() found:", result);
   return result;
 }
@@ -223,8 +235,348 @@ function renderPlayer(container, label, username, data) {
   const rapid = data.stats.chess_rapid?.last?.rating ?? "—";
   const blitz = data.stats.chess_blitz?.last?.rating ?? "—";
   const bullet = data.stats.chess_bullet?.last?.rating ?? "—";
+  const daily = data.stats.chess_daily?.last?.rating ?? "—";
 
-  container.textContent = `${label}: ${username} — rapid: ${rapid}, blitz: ${blitz}, bullet: ${bullet}`;
+  container.textContent = `${label}: ${username} — rapid: ${rapid}, blitz: ${blitz}, bullet: ${bullet}, daily: ${daily}`;
+}
+
+// time class with the most recent last game in /stats
+function pickTimeClass(stats) {
+  if (!stats) return null;
+  let best = null;
+  for (const tc of ["bullet", "blitz", "rapid", "daily"]) {
+    const date = stats[`chess_${tc}`]?.last?.date;
+    if (date && (!best || date > best.date)) best = { tc, date };
+  }
+  return best?.tc ?? null;
+}
+
+// "/game/live/123", "/game/daily/123", "/game/123", "/analysis/game/live/123"
+function parseGameUrl(url) {
+  const m = url?.match(/\/game\/(?:(live|daily)\/)?(\d+)/);
+  return m ? { id: m[2], daily: m[1] === "daily" } : null;
+}
+
+// "auto": the game on the page, else the last game between the two, else /stats.
+// /stats is only meant for profile pages, the rest just land there if nothing else works
+async function resolveTimeClass(settings, results) {
+  if (settings.time !== "auto") return { timeClass: settings.time, source: null };
+
+  const { mode, game, pair } = current;
+  if (mode === "playing" || mode === "spectating") {
+    if (game?.daily) return { timeClass: "daily", source: "this game" };
+    if (game) {
+      const tc = await fetchGameTimeClass(game.id);
+      if (tc) return { timeClass: tc, source: "this game" };
+    }
+    const tc = await latestHeadToHeadTimeClass(pair[0], pair[1]);
+    if (tc) return { timeClass: tc, source: "last game between them" };
+  }
+
+  const tc = pickTimeClass(results[0]?.stats) ?? pickTimeClass(results[1]?.stats);
+  return { timeClass: tc, source: "most played lately" };
+}
+
+// "today" | "games:20" | "days:7"
+function parseRange(value) {
+  const [type, n] = value.split(":");
+  return n ? { type, n: Number(n) } : { type };
+}
+
+function rangeLabel(range) {
+  if (range.type === "today") return "today";
+  if (range.type === "games") return `last ${range.n} games`;
+  if (range.type === "days") return `last ${range.n} days`;
+  return "latest session";
+}
+
+async function loadSettings() {
+  const saved = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY];
+  return { ...DEFAULT_SETTINGS, ...saved };
+}
+
+// session storage so it lasts until the browser closes, not just this popup
+async function getTallyStart(username) {
+  const key = `tallyStart:${username}`;
+  const saved = (await chrome.storage.session.get(key))[key];
+  if (saved) return saved;
+  const start = Date.now();
+  await chrome.storage.session.set({ [key]: start });
+  return start;
+}
+
+// stop loading older months once the range is covered
+function needMoreFor(opts, range, now) {
+  return (games) => {
+    if (range.type === "games") return filterGames(games, opts).length < range.n;
+
+    const oldest = games.length ? Math.min(...games.map((g) => g.endTime)) : Infinity;
+    if (range.type === "today" || range.type === "days") {
+      const start =
+        range.type === "today"
+          ? new Date(now).setHours(0, 0, 0, 0) / 1000
+          : now / 1000 - range.n * 86400;
+      return oldest >= start;
+    }
+    // session: keep going while the session reaches the oldest game loaded
+    const session = applyRange(filterGames(games, opts), range, now);
+    return !session.length || session[session.length - 1].endTime <= oldest;
+  };
+}
+
+function wdl(games) {
+  const t = { w: 0, d: 0, l: 0 };
+  for (const g of games) {
+    if (g.score === 1) t.w++;
+    else if (g.score === 0) t.l++;
+    else t.d++;
+  }
+  return t;
+}
+
+async function loadPerformance(username, data, now, settings, timeClass) {
+  if (!timeClass) return null;
+
+  const opts = { timeClass, rated: settings.rated };
+  const range = parseRange(settings.range);
+  const tallyStart = await getTallyStart(username);
+
+  // enough months for the range, the session, the range before the session,
+  // the tally, and 90 days for the stability check
+  const needMore = (games) => {
+    if (needMoreFor(opts, { type: "days", n: PERF_CONFIG.stabilityWindowDays }, now)(games)) return true;
+    if (needMoreFor(opts, range, now)(games)) return true;
+    if (needMoreFor(opts, SESSION_RANGE, now)(games)) return true;
+    const session = applyRange(filterGames(games, opts), SESSION_RANGE, now);
+    const until = session[session.length - 1]?.endTime;
+    if (until && needMoreFor({ ...opts, until }, range, now)(games)) return true;
+    return !games.length || Math.min(...games.map((g) => g.endTime)) * 1000 >= tallyStart;
+  };
+
+  const all = await fetchPlayerGames(username, needMore);
+  if (!all) return null;
+  const filtered = filterGames(all, opts);
+
+  const games = applyRange(filtered, range, now);
+  const perf = performanceRating(games);
+
+  // steady players keep confidence longer between games
+  const stab = stability(sessionPerformances(all, opts, now));
+
+  // most recent game in this time class, rated or not. not /stats last.date
+  const lastActivity = filterGames(all, { timeClass, rated: "all" })[0]?.endTime ?? null;
+
+  let session = null;
+  const sessionGames = applyRange(filtered, SESSION_RANGE, now);
+  if (showSession(sessionGames, timeClass, now)) {
+    const sPerf = performanceRating(sessionGames);
+    const start = sessionGames[sessionGames.length - 1].endTime;
+    // same range, but only games from before this session
+    const basePerf = performanceRating(
+      applyRange(filterGames(all, { ...opts, until: start }), range, now)
+    );
+    session = {
+      perf: sPerf,
+      error: ratingError(sessionGames, sPerf),
+      wdl: wdl(sessionGames),
+      endTime: sessionGames[0].endTime,
+      active: now / 1000 - sessionGames[0].endTime <= PERF_CONFIG.sessionGapMinutes * 60,
+      diff: basePerf == null ? null : sPerf - basePerf,
+    };
+  }
+
+  const tallyGames = filtered.filter((g) => g.endTime * 1000 >= tallyStart);
+
+  const result = {
+    timeClass,
+    range,
+    count: games.length,
+    perf,
+    error: ratingError(games, perf),
+    conf: confidence(games, perf, now, timeClass, stab.stability),
+    stability: stab,
+    lastEndTime: lastActivity,
+    official: data?.stats?.[`chess_${timeClass}`]?.last?.rating ?? null,
+    session,
+    tally: { start: tallyStart, count: tallyGames.length, wdl: wdl(tallyGames) },
+    // for "only 7 of 20 found since ..."
+    requested: range.type === "games" ? range.n : null,
+    searchedSince: all.length ? Math.min(...all.map((g) => g.endTime)) : null,
+  };
+  console.log(`[Performance] loadPerformance("${username}"):`, result);
+  return result;
+}
+
+function timeAgo(endTime, now) {
+  const mins = Math.round((now / 1000 - endTime) / 60);
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / 1440)}d ago`;
+}
+
+const signed = (n) => `${n >= 0 ? "+" : ""}${n}`;
+const pct = (x) => `${Math.round(x * 100)}%`;
+const fmtWdl = (t) => `${t.w}W ${t.d}D ${t.l}L`;
+
+// fully stable (ratio <= 1.5) or not. anything above 1.5 is already losing stability
+function stabilityText(st) {
+  if (!st || st.reason) return "Not enough sessions to judge stability";
+  const ratio = st.ratio < 1 ? st.ratio.toFixed(2) : st.ratio.toFixed(1);
+  return st.stability === 1
+    ? `Stable across ${st.sessions} sessions (ratio ${ratio})`
+    : `Level is shifting (ratio ${ratio})`;
+}
+
+// appends under the player's card, after renderPlayer
+function renderPerformance(container, p, now) {
+  if (!container) return;
+  const line = (text, className) => {
+    const el = document.createElement("p");
+    el.textContent = text;
+    el.className = className;
+    container.appendChild(el);
+  };
+
+  if (!p) {
+    line("Couldn't load performance.", "perf-sub");
+    return;
+  }
+
+  const shortDate = (endTime) => {
+    const d = new Date(endTime * 1000);
+    const sameYear = d.getFullYear() === new Date(now).getFullYear();
+    return d.toLocaleDateString([], { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) });
+  };
+
+  if (p.count) {
+    // low confidence: number and diff go grey, not worth reading much into
+    const lowClass = p.conf.label === "Low" ? "low-conf" : "";
+    const main = document.createElement("p");
+    main.className = "perf-main";
+    const part = (text, className = "") => {
+      const span = document.createElement("span");
+      span.textContent = text;
+      span.className = className;
+      main.appendChild(span);
+    };
+    part(`Performance (${p.timeClass}, ${rangeLabel(p.range)}): `);
+    part(`${p.perf} ± ${Math.round(p.error)}`, lowClass);
+    if (p.official != null) {
+      part(` · official ${p.official} `);
+      part(`(${signed(p.perf - p.official)})`, lowClass);
+    }
+    container.appendChild(main);
+
+    line(
+      `${p.conf.label} confidence (${pct(p.conf.value)}) · freshness ${pct(p.conf.freshness)} · ` +
+        `${p.count} game${p.count === 1 ? "" : "s"} · last game ${timeAgo(p.lastEndTime, now)}`,
+      "perf-sub"
+    );
+  }
+
+  // asked for n games, got fewer: say how many and how far back we looked
+  if (p.requested && p.count < p.requested) {
+    const since = p.searchedSince ? ` since ${shortDate(p.searchedSince)}` : "";
+    line(
+      p.count
+        ? `Only ${p.count} of ${p.requested} ${p.timeClass} games found${since}.`
+        : `No ${p.timeClass} games found${since}.`,
+      "perf-sub"
+    );
+  } else if (!p.count) {
+    line(`No ${p.timeClass} games in ${rangeLabel(p.range)}.`, "perf-sub");
+  }
+
+  line(stabilityText(p.stability), "perf-sub");
+
+  if (p.session) {
+    const s = p.session;
+    const status = s.active
+      ? `active, last game ${timeAgo(s.endTime, now)}`
+      : `ended ${timeAgo(s.endTime, now)}`;
+    const diff =
+      s.diff == null
+        ? "no earlier games to compare"
+        : `${signed(s.diff)} vs ${rangeLabel(p.range)} before it`;
+    line(
+      `Session: ${s.perf} ± ${Math.round(s.error)} · ${fmtWdl(s.wdl)} · ${status} · ${diff}`,
+      "perf-sub"
+    );
+  }
+
+  const since = new Date(p.tally.start).toLocaleString([], {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  line(`Since ${since}: ${p.tally.count ? fmtWdl(p.tally.wdl) : "no games yet"}`, "perf-sub");
+}
+
+// perf if we trust it (Medium/High), otherwise official
+function ratingFor(p) {
+  if (p?.perf != null && (p.conf?.label === "High" || p.conf?.label === "Medium")) {
+    return { rating: p.perf, source: "performance" };
+  }
+  if (p?.official != null) return { rating: p.official, source: "official" };
+  return null;
+}
+
+// expected score for entries[0] vs entries[1]
+function matchupPrediction(entries, perfs) {
+  const a = ratingFor(perfs[0]);
+  const b = ratingFor(perfs[1]);
+  if (!a || !b) return null;
+  return {
+    a: { username: entries[0].username, ...a },
+    b: { username: entries[1].username, ...b },
+    expected: expectedScore(a.rating, b.rating),
+  };
+}
+
+// h2h is null until the scan finishes, then this runs again with it
+function renderPrediction(container, pred, h2h) {
+  container.innerHTML = "";
+  if (!pred) return;
+  const line = (text, className) => {
+    const el = document.createElement("p");
+    el.textContent = text;
+    if (className) el.className = className;
+    container.appendChild(el);
+  };
+
+  let h2hText = " · h2h loading…";
+  if (h2h?.total) {
+    const actual = (h2h.aWins + h2h.draws / 2) / h2h.total;
+    h2hText = ` · h2h actual ${pct(actual)} (${h2h.total} games)`;
+  } else if (h2h) {
+    h2hText = " · no h2h games yet";
+  }
+  line(`${pred.a.username}: expected ${pct(pred.expected)}${h2hText}`, "h2h-title");
+  line(
+    `${pred.a.username} ${pred.a.rating} (${pred.a.source}) vs ${pred.b.username} ${pred.b.rating} (${pred.b.source})`,
+    "h2h-sub"
+  );
+
+  const v = h2h?.vsRatings;
+  if (v?.games) {
+    const diff = v.actual - v.expected;
+    line(
+      `h2h score ${v.actual} vs ${v.expected.toFixed(1)} expected from ratings at the time (${diff >= 0 ? "+" : ""}${diff.toFixed(1)})`,
+      "h2h-sub"
+    );
+  }
+}
+
+// h2h narrowed to the dropdowns (standard chess, one time class, rated toggle),
+// plus the same thing for just the last 30 days
+function filterHeadToHead(h2h, opts, now) {
+  if (!h2h) return null;
+  const games = filterGames(h2h.games, opts);
+  const last30 = applyRange(games, { type: "days", n: 30 }, now);
+  return {
+    ...tallyHeadToHead(h2h.a, h2h.b, games),
+    last30: tallyHeadToHead(h2h.a, h2h.b, last30),
+    opts,
+    allTotal: h2h.total,
+  };
 }
 
 // everything is from h2h.a's side
@@ -242,8 +594,11 @@ function renderHeadToHead(container, h2h) {
     line("Couldn't load head-to-head games.");
     return;
   }
+  const filterText = `${h2h.opts.timeClass}${h2h.opts.rated === "all" ? "" : `, ${h2h.opts.rated}`}`;
   if (!h2h.total) {
-    line(`No games found between ${h2h.a} and ${h2h.b}.`);
+    // say if there are games, just not in this time class / rated setting
+    const other = h2h.allTotal ? ` (${h2h.allTotal} in other settings)` : "";
+    line(`No ${filterText} games between ${h2h.a} and ${h2h.b}${other}.`);
     return;
   }
 
@@ -251,7 +606,7 @@ function renderHeadToHead(container, h2h) {
   // chess score: win 1, draw 0.5
   const score = (t) => `${t.aWins + t.draws / 2}–${t.bWins + t.draws / 2}`;
 
-  line(`${h2h.a} vs ${h2h.b}`, "h2h-title");
+  line(`${h2h.a} vs ${h2h.b} · ${filterText}`, "h2h-title");
   line(`${h2h.total} games · score ${score(h2h)}`);
   line(
     `${h2h.a} wins ${h2h.aWins} (${pct(h2h.aWins, h2h.total)}%) · ` +
@@ -259,9 +614,13 @@ function renderHeadToHead(container, h2h) {
       `${h2h.b} wins ${h2h.bWins} (${pct(h2h.bWins, h2h.total)}%)`
   );
 
-  for (const [timeClass, t] of Object.entries(h2h.byTimeClass)) {
-    line(`${timeClass}: ${t.aWins}W ${t.draws}D ${t.bWins}L (${t.total} games, ${score(t)})`, "h2h-sub");
-  }
+  const t = h2h.last30;
+  line(
+    t.total
+      ? `Last 30 days: ${t.aWins}W ${t.draws}D ${t.bWins}L (${t.total} games, ${score(t)})`
+      : "Last 30 days: no games",
+    "h2h-sub"
+  );
 
   const recent = document.createElement("ul");
   recent.className = "h2h-recent";
@@ -279,15 +638,102 @@ function renderHeadToHead(container, h2h) {
   container.appendChild(recent);
 }
 
+// stats -> performance -> head-to-head. h2h last, a first scan can be dozens of months.
+// initial = the first load after init(), which is the only one that shows progress
+async function refresh({ initial = false } = {}) {
+  if (!current) return;
+  const gen = ++refreshGen;
+  const stale = () => gen !== refreshGen;
+  clearTimeout(refreshTimer);
+
+  const { entries, pair, mode, baseStatus } = current;
+  const predictionEl = document.getElementById("prediction");
+  const statusEl = document.getElementById("status");
+  const containers = [
+    document.getElementById("primary-info"),
+    document.getElementById("opponent-info"),
+  ];
+  let ok = true;
+
+  try {
+    const settings = await loadSettings();
+    const results = await Promise.all(entries.map((entry) => fetchData(entry.username)));
+    if (stale()) return;
+    ok = results.every(Boolean);
+    console.log(
+      "[Performance] Final entries + fetched API data:",
+      entries.map((entry, i) => ({ ...entry, data: results[i] }))
+    );
+
+    const { timeClass, source } = await resolveTimeClass(settings, results);
+    if (stale()) return;
+    console.log(`[Performance] time class: ${timeClass} (${source ?? "chosen"})`);
+    document.querySelector('#ctl-time option[value="auto"]').textContent =
+      timeClass && source ? `auto (${timeClass}, ${source})` : "auto";
+
+    const now = Date.now();
+    if (initial) statusEl.textContent = `${baseStatus} Loading recent games…`;
+    const perfs = await Promise.all(
+      entries.map((entry, i) => loadPerformance(entry.username, results[i], now, settings, timeClass))
+    );
+    if (stale()) return;
+    ok = ok && perfs.every(Boolean);
+    statusEl.textContent = baseStatus;
+
+    // an unused card gets cleared by renderPlayer
+    containers.forEach((container, i) => {
+      renderPlayer(container, entries[i]?.label, entries[i]?.username, results[i]);
+      if (entries[i]) renderPerformance(container, perfs[i], now);
+    });
+    // dropdowns work during the h2h scan
+    document.body.classList.remove("is-loading");
+
+    // only when two people are actually playing each other
+    const pred =
+      mode === "playing" || mode === "spectating" ? matchupPrediction(entries, perfs) : null;
+    console.log("[Performance] matchup prediction:", pred);
+    renderPrediction(predictionEl, pred, null);
+
+    if (pair) {
+      const onProgress = initial
+        ? (done, total) => {
+            if (!stale()) statusEl.textContent = `${baseStatus} Scanning games ${done}/${total} months…`;
+          }
+        : () => {};
+      const h2hAll = await fetchHeadToHead(pair[0], pair[1], onProgress);
+      const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, Date.now());
+      if (stale()) return;
+      ok = ok && Boolean(h2h);
+      statusEl.textContent = baseStatus;
+      renderPrediction(predictionEl, pred, h2h);
+      renderHeadToHead(document.getElementById("h2h"), h2h);
+    }
+  } catch (err) {
+    if (stale()) return;
+    ok = false;
+    console.error("[Performance] refresh failed:", err);
+    document.body.classList.remove("is-loading");
+  }
+
+  // a stale refresh returned above, so only the newest one schedules the next
+  refreshDelay = ok ? REFRESH_MS : Math.min(refreshDelay * 2, MAX_BACKOFF_MS);
+  if (!ok) console.warn(`[Performance] refresh had failures, next one in ${refreshDelay / 1000}s`);
+  refreshTimer = setTimeout(() => refresh(), refreshDelay);
+}
+
 async function init() {
   const statusEl = document.getElementById("status");
-  const primaryEl = document.getElementById("primary-info");
-  const opponentEl = document.getElementById("opponent-info");
-  const h2hEl = document.getElementById("h2h");
   const changeAccountBtn = document.getElementById("change-account");
+  const controls = document.getElementById("controls");
+  const restartBtn = document.getElementById("restart-tally");
 
+  current = null;
+  clearTimeout(refreshTimer);
   changeAccountBtn.hidden = true;
-  h2hEl.innerHTML = "";
+  controls.hidden = true;
+  restartBtn.hidden = true;
+  document.getElementById("h2h").innerHTML = "";
+  document.getElementById("prediction").innerHTML = "";
 
   document.body.classList.add("is-loading");
 
@@ -310,7 +756,7 @@ async function init() {
 
     const { mode, others } = resolveMode(primaryUsername, tabData.scraped.playersOnPage);
 
-    // entries = who gets stats, pair = who gets head-to-head
+    // entries = who gets stats + performance, pair = who gets head-to-head
     let entries;
     let pair = null;
     switch (mode) {
@@ -346,28 +792,18 @@ async function init() {
         entries = [{ label: "You", username: primaryUsername }];
     }
 
+    const settings = await loadSettings();
+    document.getElementById("ctl-time").value = settings.time;
+    document.getElementById("ctl-range").value = settings.range;
+    document.getElementById("ctl-rated").value = settings.rated;
+
     changeAccountBtn.hidden = false;
+    controls.hidden = false;
+    restartBtn.hidden = false;
 
-    const baseStatus = statusEl.textContent;
-    const onProgress = (done, total) => {
-      statusEl.textContent = `${baseStatus} Scanning games ${done}/${total} months…`;
-    };
-
-    // stats and head-to-head at the same time
-    const [results, h2h] = await Promise.all([
-      Promise.all(entries.map((entry) => fetchData(entry.username))),
-      pair ? fetchHeadToHead(pair[0], pair[1], onProgress) : Promise.resolve(null),
-    ]);
-    statusEl.textContent = baseStatus;
-
-    console.log(
-      "[Performance] Final entries + fetched API data:",
-      entries.map((entry, i) => ({ ...entry, data: results[i] }))
-    );
-
-    renderPlayer(primaryEl, entries[0]?.label, entries[0]?.username, results[0]);
-    renderPlayer(opponentEl, entries[1]?.label, entries[1]?.username, results[1]);
-    if (pair) renderHeadToHead(h2hEl, h2h);
+    const game = parseGameUrl(tabData.tab.url) ?? parseGameUrl(tabData.scraped.canonicalHref);
+    current = { entries, pair, mode, game, baseStatus: statusEl.textContent };
+    await refresh({ initial: true });
   } catch (err) {
     console.error("[Performance] init() failed:", err);
     statusEl.textContent = "Something went wrong - check the popup's console (right-click the extension icon > Inspect popup).";
@@ -375,6 +811,27 @@ async function init() {
     document.body.classList.remove("is-loading");
   }
 }
+
+// save the choice and redo everything with it
+for (const [id, field] of [["ctl-time", "time"], ["ctl-range", "range"], ["ctl-rated", "rated"]]) {
+  document.getElementById(id).addEventListener("change", async (e) => {
+    const settings = await loadSettings();
+    await chrome.storage.local.set({ [SETTINGS_KEY]: { ...settings, [field]: e.target.value } });
+    console.log(`[Performance] ${field} -> ${e.target.value}`);
+    refresh();
+  });
+}
+
+// tally counts from now again, for everyone shown
+document.getElementById("restart-tally").addEventListener("click", async () => {
+  if (!current) return;
+  const now = Date.now();
+  await chrome.storage.session.set(
+    Object.fromEntries(current.entries.map((e) => [`tallyStart:${e.username}`, now]))
+  );
+  console.log("[Performance] Restarted session tally.");
+  refresh();
+});
 
 // clears the saved username and asks again
 document
@@ -389,6 +846,6 @@ document.addEventListener("DOMContentLoaded", init);
 
 // suggestions:
 // - filter head-to-head by rated only or by rules (chess960 etc). both are already saved per game
-// - first scan for a long-time friend can be dozens of months. cached after, but a "scanning" spinner would help
 // - "spectating" only compares the first two names found. a third name on the page gets ignored
 // - typed usernames aren't checked against chess.com before saving. a typo only shows up later as "couldn't load stats"
+// - official rating comes from /stats, which is cached 5 min (STATS_CACHE_TTL_MS), so it can lag the 60s refresh

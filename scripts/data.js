@@ -2,6 +2,8 @@ const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 // chess.com rate limits parallel requests (429), so keep this small
 const ARCHIVE_CONCURRENCY = 3;
 const API = "https://api.chess.com/pub/player";
+// bump when summarizeGame changes shape, so old cached h2h months get refetched
+const H2H_CACHE_VERSION = 2;
 
 // json or null. retries once on 429
 async function fetchJson(url) {
@@ -65,11 +67,14 @@ function summarizeGame(g) {
     rules: g.rules,
     white: g.white.username.toLowerCase(),
     black: g.black.username.toLowerCase(),
+    whiteRating: g.white.rating,
+    blackRating: g.black.rating,
     winner: winner ? winner.toLowerCase() : null, // null = draw
   };
 }
 
-// wins/draws from a's side, overall and per time class
+// wins/draws from a's side, overall and per time class.
+// expected = what the ratings at the time of each game predicted for a
 function tallyHeadToHead(a, b, games) {
   const empty = () => ({ aWins: 0, bWins: 0, draws: 0, total: 0 });
   const totals = empty();
@@ -84,7 +89,21 @@ function tallyHeadToHead(a, b, games) {
       else t.draws++;
     }
   }
-  return { a, b, ...totals, byTimeClass, games };
+
+  let expected = 0;
+  let actual = 0;
+  let ratedGames = 0;
+  for (const g of games) {
+    if (g.whiteRating == null || g.blackRating == null) continue;
+    const aIsWhite = g.white === a;
+    const aRating = aIsWhite ? g.whiteRating : g.blackRating;
+    const bRating = aIsWhite ? g.blackRating : g.whiteRating;
+    expected += expectedScore(aRating, bRating);
+    actual += g.winner === a ? 1 : g.winner === b ? 0 : 0.5;
+    ratedGames++;
+  }
+
+  return { a, b, ...totals, byTimeClass, games, vsRatings: { expected, actual, games: ratedGames } };
 }
 
 // every game between a and b, from the monthly archives
@@ -108,7 +127,8 @@ async function fetchHeadToHead(a, b, onProgress = () => {}) {
   // a month fetched while it was still going gets refetched
   const pairKey = [a, b].sort().join(":");
   const cacheKey = `h2h:${pairKey}`;
-  const cache = (await chrome.storage.local.get(cacheKey))[cacheKey] || { months: {} };
+  let cache = (await chrome.storage.local.get(cacheKey))[cacheKey];
+  if (cache?.version !== H2H_CACHE_VERSION) cache = { version: H2H_CACHE_VERSION, months: {} };
   const currentMonth = new Date().toISOString().slice(0, 7).replace("-", "/");
   const toFetch = shared.filter((m) => !cache.months[m]?.complete);
 
@@ -153,4 +173,88 @@ async function fetchHeadToHead(a, b, onProgress = () => {}) {
   const result = tallyHeadToHead(a, b, games);
   console.log(`[Performance] h2h ${a} vs ${b}:`, result);
   return result;
+}
+
+const GAMES_MAX_MONTHS = 6;
+const CURRENT_MONTH_TTL_MS = 60 * 1000;
+
+// one month of a player's games, summarized from their side.
+// finished months cached forever, current month refetched after ~1 min
+async function fetchPlayerMonth(name, month, currentMonth) {
+  const cacheKey = `games:${name}:${month}`;
+  const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
+  const fresh =
+    cached && (cached.complete || Date.now() - cached.fetchedAt < CURRENT_MONTH_TTL_MS);
+  if (fresh) return cached.games;
+
+  const data = await fetchJson(`${API}/${encodeURIComponent(name)}/games/${month}`);
+  if (!data) {
+    // stale beats nothing
+    if (cached) console.warn(`[Performance] ${name} ${month}: fetch failed, using cached copy`);
+    return cached ? cached.games : [];
+  }
+
+  const games = data.games.map((g) => summarizeForPlayer(g, name));
+  await chrome.storage.local.set({
+    [cacheKey]: { games, fetchedAt: Date.now(), complete: month < currentMonth },
+  });
+  return games;
+}
+
+// newest months first. needMore(gamesSoFar, month) says whether to load an older one
+async function fetchPlayerGames(username, needMore) {
+  const name = username.toLowerCase();
+  const arch = await fetchJson(`${API}/${encodeURIComponent(name)}/games/archives`);
+  if (!arch) return null;
+
+  const currentMonth = new Date().toISOString().slice(0, 7).replace("-", "/");
+  const months = arch.archives.map((url) => url.slice(-7)).reverse().slice(0, GAMES_MAX_MONTHS);
+
+  let games = [];
+  for (const month of months) {
+    games = games.concat(await fetchPlayerMonth(name, month, currentMonth));
+    if (!needMore(games, month)) break;
+  }
+
+  console.log(`[Performance] fetchPlayerGames("${name}"): ${games.length} games`);
+  return games;
+}
+
+// time class of one live game by id. undocumented endpoint, but it works for
+// games still in progress (not in the archives yet). cached per game
+async function fetchGameTimeClass(gameId) {
+  const key = `gameTc:${gameId}`;
+  const cached = (await chrome.storage.session.get(key))[key];
+  if (cached) return cached;
+
+  const data = await fetchJson(`https://www.chess.com/callback/live/game/${gameId}`);
+  const timeClass = classifyTimeControl(data?.game?.pgnHeaders?.TimeControl);
+  console.log(`[Performance] game ${gameId} time class:`, timeClass);
+  if (timeClass) await chrome.storage.session.set({ [key]: timeClass });
+  return timeClass;
+}
+
+// time class of the latest standard game between a and b.
+// a's recent months first, then whatever an earlier h2h scan cached
+async function latestHeadToHeadTimeClass(a, b) {
+  a = a.toLowerCase();
+  b = b.toLowerCase();
+  const newestVsB = (games) =>
+    games
+      .filter((g) => g.rules === "chess" && (g.opponent === b || g.white === b || g.black === b))
+      .sort((x, y) => y.endTime - x.endTime)[0];
+
+  const recent = await fetchPlayerGames(a, (games) => !newestVsB(games));
+  let latest = newestVsB(recent || []);
+
+  if (!latest) {
+    const cacheKey = `h2h:${[a, b].sort().join(":")}`;
+    const cache = (await chrome.storage.local.get(cacheKey))[cacheKey];
+    if (cache?.version === H2H_CACHE_VERSION) {
+      latest = newestVsB(Object.values(cache.months).flatMap((m) => m.games));
+    }
+  }
+
+  console.log(`[Performance] latest ${a} vs ${b} game:`, latest ?? "none");
+  return latest?.timeClass ?? null;
 }

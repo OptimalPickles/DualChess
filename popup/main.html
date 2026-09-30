@@ -16,15 +16,42 @@
             <button id="who-are-you-save" type="button">Save</button>
         </div>
 
+        <!-- saved in chrome.storage.local -->
+        <div id="controls" hidden>
+            <select id="ctl-time">
+                <option value="auto">auto</option>
+                <option value="bullet">bullet</option>
+                <option value="blitz">blitz</option>
+                <option value="rapid">rapid</option>
+                <option value="daily">daily</option>
+            </select>
+            <select id="ctl-range">
+                <option value="today">today</option>
+                <option value="games:10">last 10 games</option>
+                <option value="games:20">last 20 games</option>
+                <option value="games:50">last 50 games</option>
+                <option value="days:7">last 7 days</option>
+                <option value="days:30">last 30 days</option>
+            </select>
+            <select id="ctl-rated">
+                <option value="all">rated + unrated</option>
+                <option value="rated">rated</option>
+                <option value="unrated">unrated</option>
+            </select>
+        </div>
+
         <div id="results">
             <div id="primary-info" class="player-card"></div>
             <div id="opponent-info" class="player-card"></div>
+            <div id="prediction"></div>
             <div id="h2h"></div>
         </div>
 
+        <button id="restart-tally" type="button" hidden>Restart session tally</button>
         <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
 
-        <!-- data.js first, popup.js uses its functions -->
+        <!-- performance.js, then data.js, then popup.js. each uses the ones before it -->
+        <script src="../scripts/performance.js"></script>
         <script src="../scripts/data.js"></script>
         <script src="popup.js"></script>
     </body>
