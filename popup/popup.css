@@ -1,0 +1,110 @@
+body {
+  font-family: system-ui, sans-serif;
+  width: 300px;
+  padding: 8px;
+  margin: 0;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+#status {
+  font-size: 13px;
+  color: #444;
+}
+
+/* no pointer-events on #who-are-you or the picker can't be clicked */
+body.is-loading #results,
+body.is-loading #change-account {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+#who-are-you {
+  border: 1px solid #999;
+  border-radius: 4px;
+  padding: 8px;
+  margin: 8px 0;
+  background: #fafafa;
+}
+
+#who-are-you[hidden] {
+  display: none;
+}
+
+#who-are-you-text {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+#who-are-you-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+#who-are-you-candidates button {
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#who-are-you-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12px;
+  padding: 3px 4px;
+  margin-bottom: 6px;
+}
+
+#who-are-you-save {
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.player-card {
+  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid #eee;
+}
+
+#h2h {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+#h2h p {
+  margin: 2px 0;
+}
+
+.h2h-title {
+  font-weight: bold;
+}
+
+.h2h-sub {
+  color: #555;
+  font-size: 12px;
+}
+
+.h2h-recent {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+}
+
+#change-account {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #666;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+#change-account[hidden] {
+  display: none;
+}

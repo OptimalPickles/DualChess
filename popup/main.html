@@ -1,0 +1,31 @@
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <link rel="stylesheet" href="popup.css" />
+    </head>
+    <body>
+        <h1>Performance</h1>
+
+        <p id="status">Loading…</p>
+
+        <!-- only shown until we know your username -->
+        <div id="who-are-you" hidden>
+            <p id="who-are-you-text">Which of these is you?</p>
+            <div id="who-are-you-candidates"></div>
+            <input id="who-are-you-input" type="text" placeholder="or type your chess.com username" />
+            <button id="who-are-you-save" type="button">Save</button>
+        </div>
+
+        <div id="results">
+            <div id="primary-info" class="player-card"></div>
+            <div id="opponent-info" class="player-card"></div>
+            <div id="h2h"></div>
+        </div>
+
+        <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
+
+        <!-- data.js first, popup.js uses its functions -->
+        <script src="../scripts/data.js"></script>
+        <script src="popup.js"></script>
+    </body>
+</html>
