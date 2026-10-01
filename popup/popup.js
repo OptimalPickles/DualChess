@@ -1,4 +1,5 @@
-// flow: scrape tab -> get/ask primary -> figure out mode -> refresh() every 60s: stats -> performance -> head-to-head
+// flow: scrape tab -> get/ask primary -> figure out mode -> render() from cache right away,
+// then sync() from chess.com in the background (and every 60s), re-rendering only on changes
 // logs start with "[Performance]". popup logs: right-click icon > Inspect popup.
 // scrapeChessPage logs show in the chess.com tab's own console
 
@@ -11,10 +12,8 @@ const SESSION_RANGE = { type: "session" };
 const REFRESH_MS = 60 * 1000;
 const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
-// what init() found, reused by every refresh
+// what init() found, reused by every render and sync
 let current = null;
-// bumped on every refresh. an older one that finishes late doesn't render
-let refreshGen = 0;
 let refreshTimer = null;
 let refreshDelay = REFRESH_MS;
 
@@ -260,16 +259,17 @@ function parseGameUrl(url) {
 // "auto": the game on the page, else the last game between the two, else /stats.
 // /stats is only meant for profile pages, the rest just land there if nothing else works
 async function resolveTimeClass(settings, results) {
+  const opt = { cacheOnly: true };
   if (settings.time !== "auto") return { timeClass: settings.time, source: null };
 
   const { mode, game, pair } = current;
   if (mode === "playing" || mode === "spectating") {
     if (game?.daily) return { timeClass: "daily", source: "this game" };
     if (game) {
-      const tc = await fetchGameTimeClass(game.id);
+      const tc = await fetchGameTimeClass(game.id, opt);
       if (tc) return { timeClass: tc, source: "this game" };
     }
-    const tc = await latestHeadToHeadTimeClass(pair[0], pair[1]);
+    const tc = await latestHeadToHeadTimeClass(pair[0], pair[1], opt);
     if (tc) return { timeClass: tc, source: "last game between them" };
   }
 
@@ -305,25 +305,6 @@ async function getTallyStart(username) {
   return start;
 }
 
-// stop loading older months once the range is covered
-function needMoreFor(opts, range, now) {
-  return (games) => {
-    if (range.type === "games") return filterGames(games, opts).length < range.n;
-
-    const oldest = games.length ? Math.min(...games.map((g) => g.endTime)) : Infinity;
-    if (range.type === "today" || range.type === "days") {
-      const start =
-        range.type === "today"
-          ? new Date(now).setHours(0, 0, 0, 0) / 1000
-          : now / 1000 - range.n * 86400;
-      return oldest >= start;
-    }
-    // session: keep going while the session reaches the oldest game loaded
-    const session = applyRange(filterGames(games, opts), range, now);
-    return !session.length || session[session.length - 1].endTime <= oldest;
-  };
-}
-
 function wdl(games) {
   const t = { w: 0, d: 0, l: 0 };
   for (const g of games) {
@@ -341,19 +322,9 @@ async function loadPerformance(username, data, now, settings, timeClass) {
   const range = parseRange(settings.range);
   const tallyStart = await getTallyStart(username);
 
-  // enough months for the range, the session, the range before the session,
-  // the tally, and 90 days for the stability check
-  const needMore = (games) => {
-    if (needMoreFor(opts, { type: "days", n: PERF_CONFIG.stabilityWindowDays }, now)(games)) return true;
-    if (needMoreFor(opts, range, now)(games)) return true;
-    if (needMoreFor(opts, SESSION_RANGE, now)(games)) return true;
-    const session = applyRange(filterGames(games, opts), SESSION_RANGE, now);
-    const until = session[session.length - 1]?.endTime;
-    if (until && needMoreFor({ ...opts, until }, range, now)(games)) return true;
-    return !games.length || Math.min(...games.map((g) => g.endTime)) * 1000 >= tallyStart;
-  };
-
-  const all = await fetchPlayerGames(username, needMore);
+  // the newest 6 months, from storage. sync() keeps all 6 loaded, so any range,
+  // time class, or rated setting works without a request. null = not loaded yet
+  const all = await fetchPlayerGames(username, () => true, { cacheOnly: true });
   if (!all) return null;
   const filtered = filterGames(all, opts);
 
@@ -364,13 +335,13 @@ async function loadPerformance(username, data, now, settings, timeClass) {
   const stab = stability(sessionPerformances(all, opts, now));
 
   // most recent game in this time class, rated or not. not /stats last.date
-  const lastActivity = filterGames(all, { timeClass, rated: "all" })[0]?.endTime ?? null;
+  const lastActivity = filterGames(all, { timeClass, rated: "all" })[0]?.t ?? null;
 
   let session = null;
   const sessionGames = applyRange(filtered, SESSION_RANGE, now);
   if (showSession(sessionGames, timeClass, now)) {
     const sPerf = performanceRating(sessionGames);
-    const start = sessionGames[sessionGames.length - 1].endTime;
+    const start = sessionGames[sessionGames.length - 1].t;
     // same range, but only games from before this session
     const basePerf = performanceRating(
       applyRange(filterGames(all, { ...opts, until: start }), range, now)
@@ -379,13 +350,13 @@ async function loadPerformance(username, data, now, settings, timeClass) {
       perf: sPerf,
       error: ratingError(sessionGames, sPerf),
       wdl: wdl(sessionGames),
-      endTime: sessionGames[0].endTime,
-      active: now / 1000 - sessionGames[0].endTime <= PERF_CONFIG.sessionGapMinutes * 60,
+      endTime: sessionGames[0].t,
+      active: now / 1000 - sessionGames[0].t <= PERF_CONFIG.sessionGapMinutes * 60,
       diff: basePerf == null ? null : sPerf - basePerf,
     };
   }
 
-  const tallyGames = filtered.filter((g) => g.endTime * 1000 >= tallyStart);
+  const tallyGames = filtered.filter((g) => g.t * 1000 >= tallyStart);
 
   const result = {
     timeClass,
@@ -401,14 +372,14 @@ async function loadPerformance(username, data, now, settings, timeClass) {
     tally: { start: tallyStart, count: tallyGames.length, wdl: wdl(tallyGames) },
     // for "only 7 of 20 found since ..."
     requested: range.type === "games" ? range.n : null,
-    searchedSince: all.length ? Math.min(...all.map((g) => g.endTime)) : null,
+    searchedSince: all.length ? Math.min(...all.map((g) => g.t)) : null,
   };
   console.log(`[Performance] loadPerformance("${username}"):`, result);
   return result;
 }
 
-function timeAgo(endTime, now) {
-  const mins = Math.round((now / 1000 - endTime) / 60);
+function timeAgo(t, now) {
+  const mins = Math.round((now / 1000 - t) / 60);
   if (mins < 60) return `${mins}m ago`;
   if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
   return `${Math.round(mins / 1440)}d ago`;
@@ -442,8 +413,8 @@ function renderPerformance(container, p, now) {
     return;
   }
 
-  const shortDate = (endTime) => {
-    const d = new Date(endTime * 1000);
+  const shortDate = (t) => {
+    const d = new Date(t * 1000);
     const sameYear = d.getFullYear() === new Date(now).getFullYear();
     return d.toLocaleDateString([], { month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) });
   };
@@ -532,7 +503,8 @@ function matchupPrediction(entries, perfs) {
 }
 
 // h2h is null until the scan finishes, then this runs again with it
-function renderPrediction(container, pred, h2h) {
+// pending = the h2h scan hasn't finished yet
+function renderPrediction(container, pred, h2h, pending) {
   container.innerHTML = "";
   if (!pred) return;
   const line = (text, className) => {
@@ -542,7 +514,7 @@ function renderPrediction(container, pred, h2h) {
     container.appendChild(el);
   };
 
-  let h2hText = " · h2h loading…";
+  let h2hText = pending ? " · h2h loading…" : " · h2h unavailable";
   if (h2h?.total) {
     const actual = (h2h.aWins + h2h.draws / 2) / h2h.total;
     h2hText = ` · h2h actual ${pct(actual)} (${h2h.total} games)`;
@@ -580,7 +552,7 @@ function filterHeadToHead(h2h, opts, now) {
 }
 
 // everything is from h2h.a's side
-function renderHeadToHead(container, h2h) {
+function renderHeadToHead(container, h2h, pending) {
   container.innerHTML = "";
   const line = (text, className) => {
     const p = document.createElement("p");
@@ -591,7 +563,7 @@ function renderHeadToHead(container, h2h) {
   };
 
   if (!h2h) {
-    line("Couldn't load head-to-head games.");
+    line(pending ? "Loading head-to-head…" : "Couldn't load head-to-head games.");
     return;
   }
   const filterText = `${h2h.opts.timeClass}${h2h.opts.rated === "all" ? "" : `, ${h2h.opts.rated}`}`;
@@ -625,11 +597,11 @@ function renderHeadToHead(container, h2h) {
   const recent = document.createElement("ul");
   recent.className = "h2h-recent";
   for (const g of h2h.games.slice(0, RECENT_GAMES_SHOWN)) {
-    const result = g.winner === h2h.a ? "W" : g.winner === h2h.b ? "L" : "D";
-    const date = new Date(g.endTime * 1000).toLocaleDateString();
+    const result = g.score === 1 ? "W" : g.score === 0 ? "L" : "D";
+    const date = new Date(g.t * 1000).toLocaleDateString();
     const li = document.createElement("li");
     const a = document.createElement("a");
-    a.href = g.url;
+    a.href = gameUrl(g);
     a.target = "_blank";
     a.textContent = `${result} · ${g.timeClass} · ${date}`;
     li.appendChild(a);
@@ -638,87 +610,146 @@ function renderHeadToHead(container, h2h) {
   container.appendChild(recent);
 }
 
-// stats -> performance -> head-to-head. h2h last, a first scan can be dozens of months.
-// initial = the first load after init(), which is the only one that shows progress
-async function refresh({ initial = false } = {}) {
-  if (!current) return;
-  const gen = ++refreshGen;
-  const stale = () => gen !== refreshGen;
-  clearTimeout(refreshTimer);
+// --- render from cache, sync from chess.com -------------------------------
+// render() never touches the network. it builds everything from storage and only
+// redraws when the numbers changed. sync() is the only thing that makes requests,
+// and it calls render() once new data is saved.
 
-  const { entries, pair, mode, baseStatus } = current;
-  const predictionEl = document.getElementById("prediction");
-  const statusEl = document.getElementById("status");
+// everything the popup shows, from storage alone
+async function buildView() {
+  const { entries, pair, mode } = current;
+  const opt = { cacheOnly: true };
+  const settings = await loadSettings();
+  const results = await Promise.all(entries.map((entry) => fetchStats(entry.username, opt)));
+  const { timeClass, source } = await resolveTimeClass(settings, results);
+
+  const now = Date.now();
+  const perfs = await Promise.all(
+    entries.map((entry, i) => loadPerformance(entry.username, results[i], now, settings, timeClass))
+  );
+  // only when two people are actually playing each other
+  const pred =
+    mode === "playing" || mode === "spectating" ? matchupPrediction(entries, perfs) : null;
+  const h2hAll = pair ? await fetchHeadToHead(pair[0], pair[1], () => {}, opt) : null;
+  const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, now);
+
+  // complete = every card has real numbers, not "not loaded yet"
+  const complete = results.every(Boolean) && perfs.every(Boolean);
+  return { settings, results, timeClass, source, now, perfs, pred, h2h, complete };
+}
+
+// the numbers on screen, minus anything that only moves because the clock moved,
+// so "changed" means the data changed
+function viewSignature(view) {
+  const ratings = (r) =>
+    r && ["bullet", "blitz", "rapid", "daily"].map((tc) => r.stats[`chess_${tc}`]?.last?.rating ?? null);
+  const perf = (p) =>
+    p && {
+      perf: p.perf, error: Math.round(p.error ?? 0), count: p.count, last: p.lastEndTime,
+      label: p.conf?.label, stability: p.stability?.ratio, official: p.official,
+      session: p.session && [p.session.perf, p.session.wdl, p.session.endTime, p.session.active],
+      tally: [p.tally.start, p.tally.count, p.tally.wdl],
+    };
+  const h = view.h2h;
+  return JSON.stringify({
+    settings: view.settings, timeClass: view.timeClass, source: view.source,
+    h2hSynced: Boolean(current.h2hSynced),
+    stats: view.results.map(ratings),
+    perfs: view.perfs.map(perf),
+    h2h: h && [h.total, h.aWins, h.draws, h.bWins, h.last30.total, h.games[0]?.t ?? null],
+  });
+}
+
+let renderGen = 0;
+let lastSignature = null;
+
+// final = sync has run, so missing numbers are real failures, not "still loading".
+// returns true if the cards are showing numbers
+async function render({ final = false } = {}) {
+  if (!current) return false;
+  const gen = ++renderGen;
+  const view = await buildView();
+  // a newer render started while this one was reading storage
+  if (gen !== renderGen) return false;
+  // nothing cached yet: keep "loading" up rather than empty cards
+  if (!view.complete && !final) return false;
+
+  const signature = viewSignature(view);
+  if (signature === lastSignature) return true;
+  lastSignature = signature;
+  console.log("[Performance] render:", view);
+
+  const { entries, pair } = current;
+  const { timeClass, source, results, perfs, pred, h2h, now } = view;
+  document.querySelector('#ctl-time option[value="auto"]').textContent =
+    timeClass && source ? `auto (${timeClass}, ${source})` : "auto";
+
   const containers = [
     document.getElementById("primary-info"),
     document.getElementById("opponent-info"),
   ];
+  // an unused card gets cleared by renderPlayer
+  containers.forEach((container, i) => {
+    renderPlayer(container, entries[i]?.label, entries[i]?.username, results[i]);
+    if (entries[i]) renderPerformance(container, perfs[i], now);
+  });
+
+  const pending = Boolean(pair) && !h2h && !current.h2hSynced;
+  renderPrediction(document.getElementById("prediction"), pred, h2h, pending);
+  if (pair) renderHeadToHead(document.getElementById("h2h"), h2h, pending);
+
+  // dropdowns work during the h2h scan
+  document.body.classList.remove("is-loading");
+  return true;
+}
+
+let syncGen = 0;
+
+// the only place that asks chess.com for anything: /stats, the newest 6 months of each
+// player, this game's time class, and the h2h months. mostly 304s after the first time.
+// stats -> recent games -> render -> head-to-head -> render
+async function sync() {
+  if (!current) return;
+  const gen = ++syncGen;
+  const stale = () => gen !== syncGen;
+  clearTimeout(refreshTimer);
+
+  const { entries, pair, game, baseStatus } = current;
+  const statusEl = document.getElementById("status");
   let ok = true;
 
   try {
-    const settings = await loadSettings();
-    const results = await Promise.all(entries.map((entry) => fetchData(entry.username)));
+    const stats = await Promise.all(entries.map((entry) => fetchStats(entry.username)));
+    const games = await Promise.all(entries.map((entry) => fetchPlayerGames(entry.username, () => true)));
+    if (game && !game.daily) await fetchGameTimeClass(game.id);
     if (stale()) return;
-    ok = results.every(Boolean);
-    console.log(
-      "[Performance] Final entries + fetched API data:",
-      entries.map((entry, i) => ({ ...entry, data: results[i] }))
-    );
-
-    const { timeClass, source } = await resolveTimeClass(settings, results);
-    if (stale()) return;
-    console.log(`[Performance] time class: ${timeClass} (${source ?? "chosen"})`);
-    document.querySelector('#ctl-time option[value="auto"]').textContent =
-      timeClass && source ? `auto (${timeClass}, ${source})` : "auto";
-
-    const now = Date.now();
-    if (initial) statusEl.textContent = `${baseStatus} Loading recent games…`;
-    const perfs = await Promise.all(
-      entries.map((entry, i) => loadPerformance(entry.username, results[i], now, settings, timeClass))
-    );
-    if (stale()) return;
-    ok = ok && perfs.every(Boolean);
+    ok = stats.every(Boolean) && games.every(Boolean);
     statusEl.textContent = baseStatus;
-
-    // an unused card gets cleared by renderPlayer
-    containers.forEach((container, i) => {
-      renderPlayer(container, entries[i]?.label, entries[i]?.username, results[i]);
-      if (entries[i]) renderPerformance(container, perfs[i], now);
-    });
-    // dropdowns work during the h2h scan
-    document.body.classList.remove("is-loading");
-
-    // only when two people are actually playing each other
-    const pred =
-      mode === "playing" || mode === "spectating" ? matchupPrediction(entries, perfs) : null;
-    console.log("[Performance] matchup prediction:", pred);
-    renderPrediction(predictionEl, pred, null);
+    await render({ final: true });
 
     if (pair) {
-      const onProgress = initial
-        ? (done, total) => {
-            if (!stale()) statusEl.textContent = `${baseStatus} Scanning games ${done}/${total} months…`;
-          }
-        : () => {};
-      const h2hAll = await fetchHeadToHead(pair[0], pair[1], onProgress);
-      const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, Date.now());
+      // a first scan can be dozens of months. a reopen is just this month, no need to say so
+      const onProgress = (done, total) => {
+        if (total > 1 && !stale()) statusEl.textContent = `${baseStatus} Scanning games ${done}/${total} months…`;
+      };
+      const h2h = await fetchHeadToHead(pair[0], pair[1], onProgress);
       if (stale()) return;
       ok = ok && Boolean(h2h);
+      current.h2hSynced = true;
       statusEl.textContent = baseStatus;
-      renderPrediction(predictionEl, pred, h2h);
-      renderHeadToHead(document.getElementById("h2h"), h2h);
+      await render({ final: true });
     }
   } catch (err) {
     if (stale()) return;
     ok = false;
-    console.error("[Performance] refresh failed:", err);
+    console.error("[Performance] sync failed:", err);
     document.body.classList.remove("is-loading");
   }
 
-  // a stale refresh returned above, so only the newest one schedules the next
+  // a stale sync returned above, so only the newest one schedules the next
   refreshDelay = ok ? REFRESH_MS : Math.min(refreshDelay * 2, MAX_BACKOFF_MS);
-  if (!ok) console.warn(`[Performance] refresh had failures, next one in ${refreshDelay / 1000}s`);
-  refreshTimer = setTimeout(() => refresh(), refreshDelay);
+  if (!ok) console.warn(`[Performance] sync had failures, next one in ${refreshDelay / 1000}s`);
+  refreshTimer = setTimeout(() => sync(), refreshDelay);
 }
 
 async function init() {
@@ -738,6 +769,9 @@ async function init() {
   document.body.classList.add("is-loading");
 
   try {
+    // once: drop the old per-feature caches, months live in one store now
+    await migrateStorage();
+
     const tabData = await getActiveChessTabData();
     console.log("[Performance] Active tab + scrape result:", tabData);
 
@@ -803,7 +837,11 @@ async function init() {
 
     const game = parseGameUrl(tabData.tab.url) ?? parseGameUrl(tabData.scraped.canonicalHref);
     current = { entries, pair, mode, game, baseStatus: statusEl.textContent };
-    await refresh({ initial: true });
+    lastSignature = null;
+
+    // cached numbers first, instantly. then check chess.com for anything new
+    if (!(await render())) statusEl.textContent = `${current.baseStatus} Loading recent games…`;
+    await sync();
   } catch (err) {
     console.error("[Performance] init() failed:", err);
     statusEl.textContent = "Something went wrong - check the popup's console (right-click the extension icon > Inspect popup).";
@@ -818,7 +856,8 @@ for (const [id, field] of [["ctl-time", "time"], ["ctl-range", "range"], ["ctl-r
     const settings = await loadSettings();
     await chrome.storage.local.set({ [SETTINGS_KEY]: { ...settings, [field]: e.target.value } });
     console.log(`[Performance] ${field} -> ${e.target.value}`);
-    refresh();
+    // everything needed is already in storage, so this makes no requests
+    render({ final: true });
   });
 }
 
@@ -830,7 +869,7 @@ document.getElementById("restart-tally").addEventListener("click", async () => {
     Object.fromEntries(current.entries.map((e) => [`tallyStart:${e.username}`, now]))
   );
   console.log("[Performance] Restarted session tally.");
-  refresh();
+  render({ final: true });
 });
 
 // clears the saved username and asks again
@@ -845,7 +884,5 @@ document
 document.addEventListener("DOMContentLoaded", init);
 
 // suggestions:
-// - filter head-to-head by rated only or by rules (chess960 etc). both are already saved per game
 // - "spectating" only compares the first two names found. a third name on the page gets ignored
 // - typed usernames aren't checked against chess.com before saving. a typo only shows up later as "couldn't load stats"
-// - official rating comes from /stats, which is cached 5 min (STATS_CACHE_TTL_MS), so it can lag the 60s refresh

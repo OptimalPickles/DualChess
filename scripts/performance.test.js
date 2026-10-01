@@ -7,14 +7,13 @@ const NOW = Date.UTC(2026, 8, 30, 12, 0); // fixed so ages don't drift
 const NOW_S = NOW / 1000;
 const DAY = 86400;
 
-// already-summarized game, from the player's side
+// a month record, from the player's side
 const game = (oppRating, score, extra = {}) => ({
   oppRating,
   score,
-  endTime: NOW_S - 60,
+  t: NOW_S - 60,
   timeClass: "bullet",
   rated: true,
-  rules: "chess",
   ...extra,
 });
 
@@ -70,7 +69,7 @@ test("bullet, 8 games all today -> Medium (~0.49)", () => {
 });
 
 test("bullet, 8 games one per day over the last week -> Low (~0.25)", () => {
-  const games = evenGames(8).map((g, i) => ({ ...g, endTime: NOW_S - i * DAY }));
+  const games = evenGames(8).map((g, i) => ({ ...g, t: NOW_S - i * DAY }));
   const c = p.confidence(games, 1500, NOW, "bullet");
   near(c.value, 0.25, 0.01, "confidence");
   assert.equal(c.label, "Low");
@@ -83,12 +82,11 @@ test("bullet, 20 games all today -> High", () => {
 
 // --- filtering + sessions ---
 
-test("chess960 and other time classes are filtered out", () => {
+test("filterGames keeps one time class and honours the rated toggle", () => {
   const games = [
-    game(1500, 1, { endTime: NOW_S - 100 }),
-    game(1500, 1, { endTime: NOW_S - 200, rules: "chess960" }),
-    game(1500, 1, { endTime: NOW_S - 300, timeClass: "blitz" }),
-    game(1500, 1, { endTime: NOW_S - 400, rated: false }),
+    game(1500, 1, { t: NOW_S - 100 }),
+    game(1500, 1, { t: NOW_S - 300, timeClass: "blitz" }),
+    game(1500, 1, { t: NOW_S - 400, rated: false }),
   ];
   assert.equal(p.filterGames(games, { timeClass: "bullet" }).length, 2);
   assert.equal(p.filterGames(games, { timeClass: "bullet", rated: "rated" }).length, 1);
@@ -96,11 +94,11 @@ test("chess960 and other time classes are filtered out", () => {
 });
 
 test("sessions split on a gap of more than 30 minutes", () => {
-  const at = (minsAgo) => game(1500, 1, { endTime: NOW_S - minsAgo * 60 });
+  const at = (minsAgo) => game(1500, 1, { t: NOW_S - minsAgo * 60 });
   // gaps: 10 min, 30 min (same session), 31 min (new session)
   const sessions = p.splitSessions([at(71), at(0), at(40), at(10)]);
   assert.deepEqual(
-    sessions.map((s) => s.map((g) => (NOW_S - g.endTime) / 60)),
+    sessions.map((s) => s.map((g) => (NOW_S - g.t) / 60)),
     [[0, 10, 40], [71]]
   );
 });
@@ -130,7 +128,7 @@ test("fewer than 3 qualifying sessions -> stability 0", () => {
 });
 
 test("20 bullet games 10 days ago, error 78: stability 0 -> Low (~0.08), 1 -> Medium (~0.43)", () => {
-  const games = evenGames(20).map((g) => ({ ...g, endTime: NOW_S - 10 * DAY }));
+  const games = evenGames(20).map((g) => ({ ...g, t: NOW_S - 10 * DAY }));
   assert.equal(Math.round(p.ratingError(games, 1500)), 78);
 
   const unstable = p.confidence(games, 1500, NOW, "bullet", 0);
@@ -148,7 +146,7 @@ test("20 bullet games 10 days ago, error 78: stability 0 -> Low (~0.08), 1 -> Me
 test("sessionPerformances keeps 5+ game sessions and can drop an opponent", () => {
   // one session: 3 games vs "friend", 3 vs others, 5 min apart
   const games = Array.from({ length: 6 }, (_, i) =>
-    game(1500, i % 2, { endTime: NOW_S - i * 300, opponent: i < 3 ? "friend" : "other" })
+    game(1500, i % 2, { t: NOW_S - i * 300, opponent: i < 3 ? "friend" : "other" })
   );
   assert.equal(p.sessionPerformances(games, { timeClass: "bullet" }, NOW).length, 1);
   // without friend's 3 games only 3 are left, under 5
@@ -157,7 +155,7 @@ test("sessionPerformances keeps 5+ game sessions and can drop an opponent", () =
 
 test("session line: 3+ games, within 12h, never daily", () => {
   const ago = (hours, n = 3) =>
-    Array.from({ length: n }, (_, i) => ({ endTime: NOW_S - hours * 3600 - i * 300 }));
+    Array.from({ length: n }, (_, i) => ({ t: NOW_S - hours * 3600 - i * 300 }));
   assert.equal(p.showSession(ago(1), "blitz", NOW), true);
   assert.equal(p.showSession(ago(1, 2), "blitz", NOW), false);
   assert.equal(p.showSession(ago(13), "blitz", NOW), false);
@@ -174,15 +172,41 @@ test("time control -> time class", () => {
   assert.equal(p.classifyTimeControl(""), null);
 });
 
-test("summarizeForPlayer scores from that player's side", () => {
-  const raw = {
-    white: { username: "Me", result: "win", rating: 1500 },
-    black: { username: "Friend", result: "resigned", rating: 1620 },
-    end_time: 123, time_class: "blitz", rated: true, rules: "chess", url: "u",
-  };
-  assert.equal(p.summarizeForPlayer(raw, "me").score, 1);
-  assert.equal(p.summarizeForPlayer(raw, "friend").score, 0);
-  assert.equal(p.summarizeForPlayer(raw, "FRIEND").oppRating, 1500);
-  const draw = { ...raw, white: { ...raw.white, result: "agreed" }, black: { ...raw.black, result: "agreed" } };
-  assert.equal(p.summarizeForPlayer(draw, "me").score, 0.5);
+// raw api games for the monthRecords tests
+const rawGame = (opts = {}) => ({
+  white: { username: "Me", result: "win", rating: 1500 },
+  black: { username: "Friend", result: "resigned", rating: 1620 },
+  end_time: 123, time_class: "blitz", rated: true, rules: "chess",
+  url: "https://www.chess.com/game/live/174288275536",
+  ...opts,
+});
+
+test("monthRecords: records from that player's side", () => {
+  assert.deepEqual(p.monthRecords([rawGame()], "me")[0], {
+    id: 174288275536, t: 123, rating: 1500, oppRating: 1620,
+    opponent: "friend", score: 1, rated: true, timeClass: "blitz",
+  });
+  const theirs = p.monthRecords([rawGame()], "FRIEND")[0];
+  assert.equal(theirs.score, 0);
+  assert.equal(theirs.rating, 1620);
+  assert.equal(theirs.opponent, "me");
+  const draw = rawGame({
+    white: { username: "Me", result: "agreed", rating: 1500 },
+    black: { username: "Friend", result: "agreed", rating: 1620 },
+  });
+  assert.equal(p.monthRecords([draw], "me")[0].score, 0.5);
+});
+
+test("monthRecords drops chess960 and other variants", () => {
+  const games = [rawGame(), rawGame({ rules: "chess960" }), rawGame({ rules: "oddschess" })];
+  assert.equal(p.monthRecords(games, "me").length, 1);
+});
+
+test("gameUrl rebuilds live and daily urls from the id", () => {
+  assert.equal(p.gameUrl({ id: 174288275536, timeClass: "bullet" }), "https://www.chess.com/game/live/174288275536");
+  assert.equal(p.gameUrl({ id: 174288275536, timeClass: "rapid" }), "https://www.chess.com/game/live/174288275536");
+  assert.equal(p.gameUrl({ id: 993746602, timeClass: "daily" }), "https://www.chess.com/game/daily/993746602");
+  const daily = rawGame({ time_class: "daily", url: "https://www.chess.com/game/daily/993746602" });
+  const record = p.monthRecords([daily], "me")[0];
+  assert.equal(p.gameUrl(record), daily.url);
 });

@@ -1,5 +1,5 @@
 // pure math, no chrome.* or DOM so it runs in node too
-// endTime is in seconds (like the api), `now` is in ms (like Date.now())
+// t is in seconds (like the api), `now` is in ms (like Date.now())
 
 const PERF_CONFIG = {
   halfLifeDays: { bullet: 3, blitz: 7, rapid: 14, daily: 30 },
@@ -22,27 +22,41 @@ const PERF_CONFIG = {
   perfectScoreOffset: 400,
 };
 
-// raw api game -> that player's side of it
-function summarizeForPlayer(game, username) {
+// raw api games -> records from username's side. the one place a raw chess.com game
+// gets converted, and the one place non-standard games (chess960 etc) get dropped.
+// ratings are the ones recorded in the game, which are post-game
+function monthRecords(rawGames, username) {
   const name = username.toLowerCase();
-  const isWhite = game.white.username.toLowerCase() === name;
-  const me = isWhite ? game.white : game.black;
-  const opp = isWhite ? game.black : game.white;
+  return rawGames
+    .filter((g) => g.rules === "chess")
+    .map((g) => {
+      const isWhite = g.white.username.toLowerCase() === name;
+      const me = isWhite ? g.white : g.black;
+      const opp = isWhite ? g.black : g.white;
 
-  let score = 0.5;
-  if (me.result === "win") score = 1;
-  else if (opp.result === "win") score = 0;
+      let score = 0.5;
+      if (me.result === "win") score = 1;
+      else if (opp.result === "win") score = 0;
 
-  return {
-    score,
-    endTime: game.end_time,
-    timeClass: game.time_class,
-    rated: game.rated,
-    rules: game.rules,
-    url: game.url,
-    opponent: opp.username.toLowerCase(),
-    oppRating: opp.rating,
-  };
+      return {
+        // "https://www.chess.com/game/live/123" -> 123. gameUrl() puts it back
+        id: Number(g.url.slice(g.url.lastIndexOf("/") + 1)),
+        t: g.end_time,
+        rating: me.rating,
+        oppRating: opp.rating,
+        opponent: opp.username.toLowerCase(),
+        score,
+        rated: g.rated,
+        timeClass: g.time_class,
+      };
+    });
+}
+
+// daily games live under /game/daily/, everything else under /game/live/
+// (checked against 2,881 real games, all four time classes)
+function gameUrl(record) {
+  const kind = record.timeClass === "daily" ? "daily" : "live";
+  return `https://www.chess.com/game/${kind}/${record.id}`;
 }
 
 // chance of scoring vs opp if you're rated R
@@ -99,7 +113,7 @@ function confidence(games, R, now, timeClass, stabilityValue = 0) {
   const halfLife = baseHalfLife * (1 + PERF_CONFIG.stabilityHalfLifeBoost * stabilityValue);
   const freshness =
     games.reduce((sum, g) => {
-      const ageDays = Math.max(0, (now / 1000 - g.endTime) / 86400);
+      const ageDays = Math.max(0, (now / 1000 - g.t) / 86400);
       return sum + Math.pow(0.5, ageDays / halfLife);
     }, 0) / games.length;
 
@@ -112,45 +126,45 @@ function confidence(games, R, now, timeClass, stabilityValue = 0) {
 
 // newest first, both the sessions and the games inside them
 function splitSessions(games) {
-  const sorted = [...games].sort((a, b) => b.endTime - a.endTime);
+  const sorted = [...games].sort((a, b) => b.t - a.t);
   const gap = PERF_CONFIG.sessionGapMinutes * 60;
   const sessions = [];
 
   for (const g of sorted) {
     const current = sessions[sessions.length - 1];
     const prev = current?.[current.length - 1];
-    if (prev && prev.endTime - g.endTime <= gap) current.push(g);
+    if (prev && prev.t - g.t <= gap) current.push(g);
     else sessions.push([g]);
   }
   return sessions;
 }
 
-// rated: "all" | "rated" | "unrated". until (seconds) keeps only games before it
+// rated: "all" | "rated" | "unrated". until (seconds) keeps only games before it.
+// standard chess only is already handled by monthRecords
 function filterGames(games, { timeClass, rated = "all", until = null }) {
   return games
-    .filter((g) => g.rules === "chess")
     .filter((g) => g.timeClass === timeClass)
     .filter((g) => rated === "all" || (rated === "rated" ? g.rated : !g.rated))
-    .filter((g) => until == null || g.endTime < until)
-    .sort((a, b) => b.endTime - a.endTime);
+    .filter((g) => until == null || g.t < until)
+    .sort((a, b) => b.t - a.t);
 }
 
 // range: { type: "today" } | { type: "games", n } | { type: "days", n } | { type: "session" }
 // expects already-filtered games
 function applyRange(games, range, now) {
-  const sorted = [...games].sort((a, b) => b.endTime - a.endTime);
+  const sorted = [...games].sort((a, b) => b.t - a.t);
 
   switch (range.type) {
     case "today": {
       const midnight = new Date(now);
       midnight.setHours(0, 0, 0, 0); // local midnight
-      return sorted.filter((g) => g.endTime * 1000 >= midnight.getTime());
+      return sorted.filter((g) => g.t * 1000 >= midnight.getTime());
     }
     case "games":
       return sorted.slice(0, range.n);
     case "days": {
       const cutoff = now / 1000 - range.n * 86400;
-      return sorted.filter((g) => g.endTime >= cutoff);
+      return sorted.filter((g) => g.t >= cutoff);
     }
     case "session":
       return splitSessions(sorted)[0] || [];
@@ -181,8 +195,8 @@ function sessionPerformances(games, opts, now, excludeOpponent = null) {
         games: session.length,
         perf,
         error: ratingError(session, perf),
-        start: session[session.length - 1].endTime,
-        end: session[0].endTime,
+        start: session[session.length - 1].t,
+        end: session[0].t,
       };
     });
 }
@@ -219,7 +233,7 @@ function stability(sessions) {
 function showSession(sessionGames, timeClass, now) {
   if (timeClass === "daily") return false;
   if (sessionGames.length < PERF_CONFIG.sessionMinGames) return false;
-  const newest = Math.max(...sessionGames.map((g) => g.endTime));
+  const newest = Math.max(...sessionGames.map((g) => g.t));
   return now / 1000 - newest <= PERF_CONFIG.sessionMaxAgeHours * 3600;
 }
 
@@ -240,7 +254,8 @@ function classifyTimeControl(tc) {
 if (typeof module !== "undefined") {
   module.exports = {
     PERF_CONFIG,
-    summarizeForPlayer,
+    monthRecords,
+    gameUrl,
     expectedScore,
     performanceRating,
     ratingError,

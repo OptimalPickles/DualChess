@@ -1,260 +1,437 @@
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 // chess.com rate limits parallel requests (429), so keep this small
 const ARCHIVE_CONCURRENCY = 3;
 const API = "https://api.chess.com/pub/player";
-// bump when summarizeGame changes shape, so old cached h2h months get refetched
-const H2H_CACHE_VERSION = 2;
 
-// json or null. retries once on 429
-async function fetchJson(url) {
+// { status, data, etag }. status 0 = network error.
+// pass the etag we have and a 304 comes back with no body: "yours is still current".
+// retries once on 429
+async function fetchJson(url, etag = null) {
+  // no-store: we do our own caching, so every call here is a real request
+  const options = { cache: "no-store" };
+  if (etag) options.headers = { "If-None-Match": etag };
+
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, options);
+      // 304 isn't an error, just log it like a 200
+      const log = res.ok || res.status === 304 ? console.log : console.warn;
+      log(`[Performance] fetch ${url} -> ${res.status}`);
+
       if (res.status === 429 && attempt === 0) {
         await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
+      if (res.status === 304) return { status: 304, data: null, etag };
       // fetch doesn't throw on 404 etc, have to check
-      if (!res.ok) {
-        console.warn(`[Performance] ${res.status} from ${url}`);
-        return null;
-      }
-      return await res.json();
+      if (!res.ok) return { status: res.status, data: null, etag: null };
+      return { status: res.status, data: await res.json(), etag: res.headers.get("etag") };
     } catch (err) {
-      console.error(`[Performance] fetch failed: ${url}`, err);
-      return null;
+      console.error(`[Performance] fetch ${url} -> failed`, err);
+      return { status: 0, data: null, etag: null };
     }
   }
-  return null;
+  return { status: 429, data: null, etag: null };
 }
 
-// profile + ratings for one player
-async function fetchData(username) {
-  if (!username) return null;
-  const name = encodeURIComponent(username.toLowerCase());
+// --- month store ---------------------------------------------------------
+// one copy of every month, shared by every feature:
+//   month:<name>:<YYYY/MM>      { games }  records from monthRecords(), from that player's side
+//   monthMeta:<name>:<YYYY/MM>  { etag, fetchedAt, checkedAt, final } or { failedAt }
+//   archives:<name>             { months, etag, fetchedAt }
+//   stats:<name>                { stats, etag, fetchedAt }
+//   rev:<name>                  goes up when an old month's games change,
+//                               so derived caches know to rebuild
+// meta is its own key so picking months to recheck doesn't load every game,
+// and so two months of the same player can be saved at once without clobbering each other.
+// { cacheOnly: true } on any fetcher = answer from storage, never touch the network
 
-  // session storage clears on browser restart
-  const cacheKey = `statsCache:${name}`;
-  const cached = (await chrome.storage.session.get(cacheKey))[cacheKey];
-  if (cached && Date.now() - cached.fetchedAt < STATS_CACHE_TTL_MS) {
-    console.log(`[Performance] fetchData("${username}") cached:`, cached.data);
-    return cached.data;
+const DAY_MS = 86400 * 1000;
+const REVALIDATE_MAX_MONTHS = 3;
+const REVALIDATE_EVERY_DAYS = 30;
+const STORE_VERSION = 1;
+// chess.com's own cache-control max-age on months and /stats. a copy we got in the last
+// 5s is as fresh as theirs, so one sync never asks for the same thing twice
+const FRESH_MS = 5000;
+
+// "YYYY/MM" in UTC, like the archive urls
+const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7).replace("-", "/");
+
+// same url asked for twice at once -> both get the one pending request
+const inflight = new Map();
+function shared(key, fn) {
+  if (inflight.has(key)) return inflight.get(key);
+  const pending = fn().finally(() => inflight.delete(key));
+  inflight.set(key, pending);
+  return pending;
+}
+
+// at most ARCHIVE_CONCURRENCY month requests at once, across every caller
+let freeSlots = ARCHIVE_CONCURRENCY;
+const waiting = [];
+async function inMonthSlot(fn) {
+  if (freeSlots > 0) freeSlots--;
+  else await new Promise((resolve) => waiting.push(resolve));
+  try {
+    return await fn();
+  } finally {
+    // hand the slot straight to the next in line, or give it back
+    const next = waiting.shift();
+    if (next) next();
+    else freeSlots++;
+  }
+}
+
+// a player's month list. a cached list that already has this month can't be missing a newer one
+async function fetchArchives(username, { cacheOnly = false } = {}) {
+  const name = username.toLowerCase();
+  const url = `${API}/${encodeURIComponent(name)}/games/archives`;
+  const key = `archives:${name}`;
+  if (cacheOnly) return (await chrome.storage.local.get(key))[key]?.months ?? null;
+
+  return shared(url, async () => {
+    const cached = (await chrome.storage.local.get(key))[key];
+    if (cached?.months.includes(utcMonth(Date.now()))) return cached.months;
+    if (cached && Date.now() - cached.fetchedAt < FRESH_MS) return cached.months;
+
+    const res = await fetchJson(url, cached?.etag);
+    if (res.status === 304) {
+      await chrome.storage.local.set({ [key]: { ...cached, fetchedAt: Date.now() } });
+      return cached.months;
+    }
+    if (!res.data) return cached?.months ?? null;
+
+    const months = res.data.archives.map((u) => u.slice(-7));
+    await chrome.storage.local.set({ [key]: { months, etag: res.etag, fetchedAt: Date.now() } });
+    return months;
+  });
+}
+
+// one month of records, or null if it can't be loaded and was never cached.
+// finished months are downloaded once. anything else is rechecked with its etag.
+// cacheOnly: the cached records, null if chess.com failed us before (known missing),
+// or undefined if we've simply never loaded it (so the caller knows it's incomplete)
+async function fetchMonth(username, month, { cacheOnly = false } = {}) {
+  const name = username.toLowerCase();
+  const url = `${API}/${encodeURIComponent(name)}/games/${month}`;
+  const key = `month:${name}:${month}`;
+  const metaKey = `monthMeta:${name}:${month}`;
+  if (cacheOnly) {
+    const stored = await chrome.storage.local.get([key, metaKey]);
+    if (stored[key]) return stored[key].games;
+    return stored[metaKey]?.failedAt ? null : undefined;
   }
 
-  const [profile, stats] = await Promise.all([
-    fetchJson(`${API}/${name}`),
-    fetchJson(`${API}/${name}/stats`),
-  ]);
-  if (!profile || !stats) return null;
+  return shared(url, async () => {
+    const stored = await chrome.storage.local.get([key, metaKey]);
+    const cached = stored[key]?.games;
+    const meta = stored[metaKey];
 
-  const data = { profile, stats };
-  console.log(`[Performance] fetchData("${username}") fresh:`, data);
-  await chrome.storage.session.set({ [cacheKey]: { data, fetchedAt: Date.now() } });
-  return data;
+    // final = fetched after the month ended, so it has every game
+    if (cached && meta?.final) return cached;
+    if (cached && Date.now() - meta?.fetchedAt < FRESH_MS) return cached;
+
+    const res = await inMonthSlot(() => fetchJson(url, cached ? meta?.etag : null));
+    const now = Date.now();
+    const final = month < utcMonth(now);
+
+    if (res.status === 304) {
+      await chrome.storage.local.set({ [metaKey]: { ...meta, fetchedAt: now, checkedAt: now, final } });
+      return cached;
+    }
+    // stale beats nothing. nothing at all: remember it failed, so cacheOnly
+    // readers treat it as known missing instead of "not loaded yet"
+    if (!res.data) {
+      if (!cached) await chrome.storage.local.set({ [metaKey]: { failedAt: now } });
+      return cached ?? null;
+    }
+
+    const games = monthRecords(res.data.games, name);
+    await chrome.storage.local.set({
+      [key]: { games },
+      [metaKey]: { etag: res.etag, fetchedAt: now, checkedAt: now, final },
+    });
+    return games;
+  });
 }
 
-// winner "win", everything else on both sides is a draw
-function summarizeGame(g) {
-  const winner =
-    g.white.result === "win" ? g.white.username
-    : g.black.result === "win" ? g.black.username
-    : null;
-  return {
-    url: g.url,
-    endTime: g.end_time,
-    timeClass: g.time_class,
-    rated: g.rated,
-    rules: g.rules,
-    white: g.white.username.toLowerCase(),
-    black: g.black.username.toLowerCase(),
-    whiteRating: g.white.rating,
-    blackRating: g.black.rating,
-    winner: winner ? winner.toLowerCase() : null, // null = draw
-  };
+// which finished months are due a recheck: not checked in 30 days, oldest check first, max 3
+function pickMonthsToRevalidate(metas, now) {
+  const cutoff = now - REVALIDATE_EVERY_DAYS * DAY_MS;
+  return metas
+    .filter((m) => m.final && (m.checkedAt ?? 0) < cutoff)
+    .sort((a, b) => (a.checkedAt ?? 0) - (b.checkedAt ?? 0))
+    .slice(0, REVALIDATE_MAX_MONTHS);
 }
 
-// wins/draws from a's side, overall and per time class.
-// expected = what the ratings at the time of each game predicted for a
+// cheap background recheck of old months (the etag makes "nothing changed" a 0-byte 304).
+// the caller decides which players. returns the players whose data changed
+async function revalidateFinishedMonths(usernames) {
+  const metas = [];
+  for (const username of usernames) {
+    const name = username.toLowerCase();
+    const months = (await chrome.storage.local.get(`archives:${name}`))[`archives:${name}`]?.months || [];
+    const stored = await chrome.storage.local.get(months.map((m) => `monthMeta:${name}:${m}`));
+    for (const month of months) {
+      const meta = stored[`monthMeta:${name}:${month}`];
+      if (meta) metas.push({ name, month, ...meta });
+    }
+  }
+
+  const now = Date.now();
+  const changed = new Set();
+  for (const m of pickMonthsToRevalidate(metas, now)) {
+    const url = `${API}/${encodeURIComponent(m.name)}/games/${m.month}`;
+    const res = await inMonthSlot(() => fetchJson(url, m.etag));
+    console.log(`[Performance] revalidate ${m.name} ${m.month} -> ${res.status}`);
+    const metaKey = `monthMeta:${m.name}:${m.month}`;
+    const { name, month, ...meta } = m;
+
+    if (res.status === 304) {
+      await chrome.storage.local.set({ [metaKey]: { ...meta, checkedAt: now } });
+    } else if (res.data) {
+      const games = monthRecords(res.data.games, name);
+      await chrome.storage.local.set({
+        [`month:${name}:${month}`]: { games },
+        [metaKey]: { etag: res.etag, fetchedAt: now, checkedAt: now, final: true },
+      });
+      if (res.etag !== meta.etag) changed.add(name);
+    }
+    // anything else (404, offline): leave it, it's picked again next time
+  }
+
+  for (const name of changed) {
+    const key = `rev:${name}`;
+    const rev = (await chrome.storage.local.get(key))[key] ?? 0;
+    await chrome.storage.local.set({ [key]: rev + 1 });
+  }
+  return [...changed];
+}
+
+// derived caches store the rev they were built from, and rebuild when it moves
+async function getRevision(username) {
+  const key = `rev:${username.toLowerCase()}`;
+  return (await chrome.storage.local.get(key))[key] ?? 0;
+}
+
+// one-time cleanup of the old per-feature caches, now that months live in one place
+async function migrateStorage() {
+  const { storeVersion } = await chrome.storage.local.get("storeVersion");
+  if (storeVersion === STORE_VERSION) return;
+  const all = await chrome.storage.local.get(null);
+  const old = Object.keys(all).filter((k) => /^(h2h|games|history):/.test(k));
+  await chrome.storage.local.remove(old);
+  await chrome.storage.local.set({ storeVersion: STORE_VERSION });
+  console.log(`[Performance] storage migrated, removed ${old.length} old keys`);
+}
+
+// a player's /stats (ratings per time class). revalidated with its etag and kept in
+// local storage, so it survives browser restarts. returns { stats, fetchedAt }
+async function fetchStats(username, { cacheOnly = false } = {}) {
+  const name = username.toLowerCase();
+  const url = `${API}/${encodeURIComponent(name)}/stats`;
+  const key = `stats:${name}`;
+  const view = (c) => (c ? { stats: c.stats, fetchedAt: c.fetchedAt } : null);
+  if (cacheOnly) return view((await chrome.storage.local.get(key))[key]);
+
+  return shared(url, async () => {
+    const cached = (await chrome.storage.local.get(key))[key];
+    const res = await fetchJson(url, cached?.etag);
+    const now = Date.now();
+    if (res.status === 304) {
+      await chrome.storage.local.set({ [key]: { ...cached, fetchedAt: now } });
+      return view({ ...cached, fetchedAt: now });
+    }
+    if (!res.data) return view(cached);
+
+    const fresh = { stats: res.data, etag: res.etag, fetchedAt: now };
+    await chrome.storage.local.set({ [key]: fresh });
+    return view(fresh);
+  });
+}
+
+// wins/draws from a's side, overall and per time class. games are records from a's side.
+// expected = what the ratings recorded in each game predicted for a
 function tallyHeadToHead(a, b, games) {
   const empty = () => ({ aWins: 0, bWins: 0, draws: 0, total: 0 });
   const totals = empty();
   const byTimeClass = {};
+  let expected = 0;
+  let actual = 0;
+  let ratedGames = 0;
 
   for (const g of games) {
     const tc = (byTimeClass[g.timeClass] ||= empty());
     for (const t of [totals, tc]) {
       t.total++;
-      if (g.winner === a) t.aWins++;
-      else if (g.winner === b) t.bWins++;
+      if (g.score === 1) t.aWins++;
+      else if (g.score === 0) t.bWins++;
       else t.draws++;
     }
+    if (g.rating != null && g.oppRating != null) {
+      expected += expectedScore(g.rating, g.oppRating);
+      actual += g.score;
+      ratedGames++;
+    }
   }
-
-  let expected = 0;
-  let actual = 0;
-  let ratedGames = 0;
-  for (const g of games) {
-    if (g.whiteRating == null || g.blackRating == null) continue;
-    const aIsWhite = g.white === a;
-    const aRating = aIsWhite ? g.whiteRating : g.blackRating;
-    const bRating = aIsWhite ? g.blackRating : g.whiteRating;
-    expected += expectedScore(aRating, bRating);
-    actual += g.winner === a ? 1 : g.winner === b ? 0 : 0.5;
-    ratedGames++;
-  }
-
   return { a, b, ...totals, byTimeClass, games, vsRatings: { expected, actual, games: ratedGames } };
 }
 
-// every game between a and b, from the monthly archives
-async function fetchHeadToHead(a, b, onProgress = () => {}) {
+// a record from the other player's side, turned around to a's side
+function flipSide(r, other) {
+  return { ...r, rating: r.oppRating, oppRating: r.rating, opponent: other, score: 1 - r.score };
+}
+
+// every game between a and b, read from a's months (every game between them is in a's
+// archive). only falls back to b's month if a's won't load.
+// derived cache: games from finished months are kept per month, and thrown away if
+// either player's rev moves. only the current month is reread each time
+async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false } = {}) {
   a = a?.toLowerCase();
   b = b?.toLowerCase();
   if (!a || !b || a === b) return null;
 
-  const [archA, archB] = await Promise.all([
-    fetchJson(`${API}/${encodeURIComponent(a)}/games/archives`),
-    fetchJson(`${API}/${encodeURIComponent(b)}/games/archives`),
+  const [monthsA, monthsB] = await Promise.all([
+    fetchArchives(a, { cacheOnly }),
+    fetchArchives(b, { cacheOnly }),
   ]);
-  if (!archA || !archB) return null;
+  if (!monthsA) return null;
+  // only months both played can have games between them. if b's list failed, check all of a's
+  const bHas = monthsB ? new Set(monthsB) : null;
+  const shared = monthsA.filter((m) => !bHas || bHas.has(m));
+  const current = utcMonth(Date.now());
 
-  // archive urls end in "YYYY/MM". only months both played can have games between them
-  const monthOf = (url) => url.slice(-7);
-  const monthsB = new Set(archB.archives.map(monthOf));
-  const shared = archA.archives.map(monthOf).filter((m) => monthsB.has(m));
+  const key = `derived:h2h:${a}:${b}`;
+  const revs = `${await getRevision(a)}:${await getRevision(b)}`;
+  let cache = (await chrome.storage.local.get(key))[key];
+  if (cache?.revs !== revs) cache = { revs, months: {} };
 
-  // finished months never change so they're cached for good.
-  // a month fetched while it was still going gets refetched
-  const pairKey = [a, b].sort().join(":");
-  const cacheKey = `h2h:${pairKey}`;
-  let cache = (await chrome.storage.local.get(cacheKey))[cacheKey];
-  if (cache?.version !== H2H_CACHE_VERSION) cache = { version: H2H_CACHE_VERSION, months: {} };
-  const currentMonth = new Date().toISOString().slice(0, 7).replace("-", "/");
-  const toFetch = shared.filter((m) => !cache.months[m]?.complete);
-
-  console.log(
-    `[Performance] h2h ${a} vs ${b}: ${shared.length} shared months, ${toFetch.length} to fetch`
-  );
-
+  const toRead = shared.filter((m) => !cache.months[m]);
+  const fresh = {};
+  const missing = [];
+  let incomplete = false;
   let done = 0;
-  const queue = [...toFetch];
-  const worker = async () => {
-    while (queue.length) {
-      const month = queue.shift();
-      // same games are in both archives. chess.com sometimes errors on one
-      // (seen on huge months), so fall back to the other player's
-      const data =
-        (await fetchJson(`${API}/${encodeURIComponent(a)}/games/${month}`)) ||
-        (await fetchJson(`${API}/${encodeURIComponent(b)}/games/${month}`));
-      if (data) {
-        const games = data.games
-          .filter(
-            (g) =>
-              [g.white.username.toLowerCase(), g.black.username.toLowerCase()]
-                .sort()
-                .join(":") === pairKey
-          )
-          .map(summarizeGame);
-        cache.months[month] = { games, complete: month < currentMonth };
-        // save as we go so closing the popup mid-scan doesn't lose progress
-        await chrome.storage.local.set({ [cacheKey]: cache });
+  await Promise.all(
+    toRead.map(async (month) => {
+      let vs = null;
+      const mine = await fetchMonth(a, month, { cacheOnly });
+      if (mine) {
+        vs = mine.filter((g) => g.opponent === b);
       } else {
-        console.warn(`[Performance] h2h: couldn't load ${month} from either player`);
+        const theirs = await fetchMonth(b, month, { cacheOnly });
+        if (theirs) vs = theirs.filter((g) => g.opponent === a).map((g) => flipSide(g, b));
+        // cacheOnly: a month neither side has ever loaded
+        if (mine === undefined && theirs === undefined) incomplete = true;
       }
-      onProgress(++done, toFetch.length);
-    }
-  };
-  await Promise.all(Array.from({ length: ARCHIVE_CONCURRENCY }, worker));
+      if (!vs) missing.push(month);
+      else if (month < current) cache.months[month] = vs;
+      else fresh[month] = vs;
+      onProgress(++done, toRead.length);
+    })
+  );
+  await chrome.storage.local.set({ [key]: cache });
+  // from storage alone, a never-loaded month would make the numbers quietly wrong
+  if (incomplete) return null;
 
   const games = shared
-    .flatMap((m) => cache.months[m]?.games || [])
-    .sort((x, y) => y.endTime - x.endTime);
+    .flatMap((m) => cache.months[m] || fresh[m] || [])
+    .sort((x, y) => y.t - x.t);
 
+  if (missing.length) console.warn(`[Performance] h2h ${a} vs ${b}: couldn't load ${missing.join(", ")}`);
+  console.log(`[Performance] h2h ${a} vs ${b}: ${shared.length} shared months, ${toRead.length} read`);
   const result = tallyHeadToHead(a, b, games);
   console.log(`[Performance] h2h ${a} vs ${b}:`, result);
   return result;
 }
 
 const GAMES_MAX_MONTHS = 6;
-const CURRENT_MONTH_TTL_MS = 60 * 1000;
 
-// one month of a player's games, summarized from their side.
-// finished months cached forever, current month refetched after ~1 min
-async function fetchPlayerMonth(name, month, currentMonth) {
-  const cacheKey = `games:${name}:${month}`;
-  const cached = (await chrome.storage.local.get(cacheKey))[cacheKey];
-  const fresh =
-    cached && (cached.complete || Date.now() - cached.fetchedAt < CURRENT_MONTH_TTL_MS);
-  if (fresh) return cached.games;
-
-  const data = await fetchJson(`${API}/${encodeURIComponent(name)}/games/${month}`);
-  if (!data) {
-    // stale beats nothing
-    if (cached) console.warn(`[Performance] ${name} ${month}: fetch failed, using cached copy`);
-    return cached ? cached.games : [];
-  }
-
-  const games = data.games.map((g) => summarizeForPlayer(g, name));
-  await chrome.storage.local.set({
-    [cacheKey]: { games, fetchedAt: Date.now(), complete: month < currentMonth },
-  });
-  return games;
-}
-
-// newest months first. needMore(gamesSoFar, month) says whether to load an older one
-async function fetchPlayerGames(username, needMore) {
-  const name = username.toLowerCase();
-  const arch = await fetchJson(`${API}/${encodeURIComponent(name)}/games/archives`);
-  if (!arch) return null;
-
-  const currentMonth = new Date().toISOString().slice(0, 7).replace("-", "/");
-  const months = arch.archives.map((url) => url.slice(-7)).reverse().slice(0, GAMES_MAX_MONTHS);
+// newest months first, at most 6. needMore(gamesSoFar, month) says whether to load an older one.
+// cacheOnly: null if any month it needs was never loaded, rather than a short list
+async function fetchPlayerGames(username, needMore, { cacheOnly = false } = {}) {
+  const months = await fetchArchives(username, { cacheOnly });
+  if (!months) return null;
 
   let games = [];
-  for (const month of months) {
-    games = games.concat(await fetchPlayerMonth(name, month, currentMonth));
+  for (const month of [...months].reverse().slice(0, GAMES_MAX_MONTHS)) {
+    const got = await fetchMonth(username, month, { cacheOnly });
+    if (got === undefined) return null;
+    games = games.concat(got || []);
     if (!needMore(games, month)) break;
   }
 
-  console.log(`[Performance] fetchPlayerGames("${name}"): ${games.length} games`);
+  console.log(`[Performance] fetchPlayerGames("${username}"): ${games.length} games`);
   return games;
 }
 
 // time class of one live game by id. undocumented endpoint, but it works for
 // games still in progress (not in the archives yet). cached per game
-async function fetchGameTimeClass(gameId) {
+async function fetchGameTimeClass(gameId, { cacheOnly = false } = {}) {
   const key = `gameTc:${gameId}`;
   const cached = (await chrome.storage.session.get(key))[key];
-  if (cached) return cached;
+  if (cached || cacheOnly) return cached ?? null;
 
-  const data = await fetchJson(`https://www.chess.com/callback/live/game/${gameId}`);
+  const { data } = await fetchJson(`https://www.chess.com/callback/live/game/${gameId}`);
   const timeClass = classifyTimeControl(data?.game?.pgnHeaders?.TimeControl);
   console.log(`[Performance] game ${gameId} time class:`, timeClass);
   if (timeClass) await chrome.storage.session.set({ [key]: timeClass });
   return timeClass;
 }
 
-// time class of the latest standard game between a and b.
+// time class of the latest game between a and b.
 // a's recent months first, then whatever an earlier h2h scan cached
-async function latestHeadToHeadTimeClass(a, b) {
+async function latestHeadToHeadTimeClass(a, b, { cacheOnly = false } = {}) {
   a = a.toLowerCase();
   b = b.toLowerCase();
   const newestVsB = (games) =>
-    games
-      .filter((g) => g.rules === "chess" && (g.opponent === b || g.white === b || g.black === b))
-      .sort((x, y) => y.endTime - x.endTime)[0];
+    games.filter((g) => g.opponent === b).sort((x, y) => y.t - x.t)[0];
 
-  const recent = await fetchPlayerGames(a, (games) => !newestVsB(games));
+  const recent = await fetchPlayerGames(a, (games) => !newestVsB(games), { cacheOnly });
   let latest = newestVsB(recent || []);
 
   if (!latest) {
-    const cacheKey = `h2h:${[a, b].sort().join(":")}`;
-    const cache = (await chrome.storage.local.get(cacheKey))[cacheKey];
-    if (cache?.version === H2H_CACHE_VERSION) {
-      latest = newestVsB(Object.values(cache.months).flatMap((m) => m.games));
-    }
+    const key = `derived:h2h:${a}:${b}`;
+    const cache = (await chrome.storage.local.get(key))[key];
+    if (cache) latest = newestVsB(Object.values(cache.months).flat());
   }
 
   console.log(`[Performance] latest ${a} vs ${b} game:`, latest ?? "none");
   return latest?.timeClass ?? null;
+}
+
+// every game a player has played in one time class, oldest first
+async function fetchPlayerHistory(username, timeClass, onProgress = () => {}) {
+  const months = await fetchArchives(username);
+  if (!months) return null;
+
+  let done = 0;
+  const missingMonths = [];
+  const byMonth = await Promise.all(
+    months.map(async (month) => {
+      const games = await fetchMonth(username, month);
+      if (!games) missingMonths.push(month);
+      onProgress(++done, months.length);
+      return games || [];
+    })
+  );
+
+  const games = byMonth
+    .flat()
+    .filter((g) => g.timeClass === timeClass)
+    .sort((x, y) => x.t - y.t);
+
+  if (missingMonths.length) {
+    console.warn(`[Performance] history ${username}: couldn't load ${missingMonths.join(", ")}`);
+  }
+  console.log(`[Performance] history ${username} ${timeClass}: ${games.length} games`);
+  return { games, missingMonths };
+}
+
+// node gets module.exports (for tests), the popup just gets globals from the script tag
+if (typeof module !== "undefined") {
+  module.exports = {
+    fetchJson, fetchArchives, fetchMonth, pickMonthsToRevalidate,
+    revalidateFinishedMonths, getRevision, migrateStorage, fetchStats,
+    tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames,
+    latestHeadToHeadTimeClass, fetchPlayerHistory,
+  };
 }
