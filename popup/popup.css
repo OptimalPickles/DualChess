@@ -156,12 +156,11 @@ body.is-loading #change-account {
   font-weight: normal;
 }
 
-/* fair play lock: a game is in progress, so nothing but the status line shows */
-body.locked #controls,
-body.locked #who-are-you,
-body.locked #results,
-body.locked #restart-tally,
-body.locked #change-account {
+/* fair play lock: a game is in progress, so nothing but the status line shows.
+   hiding the views hides everything inside them */
+body.locked #views,
+body.locked section,
+body.locked #open-methodology {
   display: none;
 }
 
@@ -169,4 +168,58 @@ body.locked #change-account {
   margin: 4px 0 0;
   font-size: 11px;
   color: #777;
+}
+
+/* views */
+#views {
+  display: flex;
+  gap: 4px;
+  margin: 6px 0 8px;
+  border-bottom: 1px solid #ddd;
+}
+
+#views button {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: #555;
+}
+
+#views button[aria-pressed="true"] {
+  color: #000;
+  border-bottom-color: #333;
+  font-weight: bold;
+}
+
+section[hidden],
+#open-methodology[hidden] {
+  display: none;
+}
+
+section h2 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+
+#methodology p,
+.placeholder {
+  font-size: 12px;
+  color: #444;
+  line-height: 1.4;
+}
+
+/* a button that looks like a link (no inline onclick in mv3, so a real button) */
+button.link {
+  display: block;
+  margin-top: 10px;
+  padding: 0;
+  font-size: 11px;
+  color: #666;
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
 }

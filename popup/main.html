@@ -6,51 +6,73 @@
     <body>
         <h1>Performance</h1>
 
+        <!-- shared by every view. also where the fair play lock message goes -->
         <p id="status">Loading…</p>
 
-        <!-- only shown until we know your username -->
-        <div id="who-are-you" hidden>
-            <p id="who-are-you-text">Which of these is you?</p>
-            <div id="who-are-you-candidates"></div>
-            <input id="who-are-you-input" type="text" placeholder="or type your chess.com username" />
-            <button id="who-are-you-save" type="button">Save</button>
-        </div>
+        <!-- one button per view. methodology isn't here, it opens from its link -->
+        <nav id="views">
+            <button type="button" data-view="overview">Overview</button>
+            <button type="button" data-view="race">Race</button>
+        </nav>
 
-        <!-- saved in chrome.storage.local -->
-        <div id="controls" hidden>
-            <select id="ctl-time">
-                <option value="auto">auto</option>
-                <option value="bullet">bullet</option>
-                <option value="blitz">blitz</option>
-                <option value="rapid">rapid</option>
-                <option value="daily">daily</option>
-            </select>
-            <select id="ctl-range">
-                <option value="today">today</option>
-                <option value="games:10">last 10 games</option>
-                <option value="games:20">last 20 games</option>
-                <option value="games:50">last 50 games</option>
-                <option value="days:7">last 7 days</option>
-                <option value="days:30">last 30 days</option>
-            </select>
-            <select id="ctl-rated">
-                <option value="all">rated + unrated</option>
-                <option value="rated">rated</option>
-                <option value="unrated">unrated</option>
-            </select>
-        </div>
+        <section id="view-overview">
+            <!-- only shown until we know your username -->
+            <div id="who-are-you" hidden>
+                <p id="who-are-you-text">Which of these is you?</p>
+                <div id="who-are-you-candidates"></div>
+                <input id="who-are-you-input" type="text" placeholder="or type your chess.com username" />
+                <button id="who-are-you-save" type="button">Save</button>
+            </div>
 
-        <div id="results">
-            <div id="primary-info" class="player-card"></div>
-            <div id="opponent-info" class="player-card"></div>
-            <!-- when we last confirmed these numbers with chess.com -->
-            <p id="data-as-of"></p>
-            <div id="prediction"></div>
-            <div id="h2h"></div>
-        </div>
+            <!-- saved in chrome.storage.local -->
+            <div id="controls" hidden>
+                <select id="ctl-time">
+                    <option value="auto">auto</option>
+                    <option value="bullet">bullet</option>
+                    <option value="blitz">blitz</option>
+                    <option value="rapid">rapid</option>
+                    <option value="daily">daily</option>
+                </select>
+                <select id="ctl-range">
+                    <option value="today">today</option>
+                    <option value="games:10">last 10 games</option>
+                    <option value="games:20">last 20 games</option>
+                    <option value="games:50">last 50 games</option>
+                    <option value="days:7">last 7 days</option>
+                    <option value="days:30">last 30 days</option>
+                </select>
+                <select id="ctl-rated">
+                    <option value="all">rated + unrated</option>
+                    <option value="rated">rated</option>
+                    <option value="unrated">unrated</option>
+                </select>
+            </div>
 
-        <button id="restart-tally" type="button" hidden>Restart session tally</button>
-        <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
+            <div id="results">
+                <div id="primary-info" class="player-card"></div>
+                <div id="opponent-info" class="player-card"></div>
+                <!-- when we last confirmed these numbers with chess.com -->
+                <p id="data-as-of"></p>
+                <div id="prediction"></div>
+                <div id="h2h"></div>
+            </div>
+
+            <button id="restart-tally" type="button" hidden>Restart session tally</button>
+            <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
+        </section>
+
+        <!-- the chart comes in phase 5 -->
+        <section id="view-race" hidden>
+            <p class="placeholder">The race chart isn't built yet. It will compare both players' rating journeys here.</p>
+        </section>
+
+        <!-- filled from METHODOLOGY in performance.js -->
+        <section id="view-methodology" hidden>
+            <h2>How this is calculated</h2>
+            <div id="methodology"></div>
+        </section>
+
+        <button type="button" id="open-methodology" class="link">How this is calculated</button>
 
         <!-- performance.js, fairplay.js, then data.js, then popup.js. each uses the ones before it -->
         <script src="../scripts/performance.js"></script>

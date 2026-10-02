@@ -887,10 +887,20 @@ async function init() {
 
     current = { entries, pair, mode, gameRecord: lock.record, baseStatus: statusEl.textContent };
     lastSignature = null;
+    // anyone shown keeps their stored data for another 30 days
+    await markViewed([primaryUsername, ...entries.map((e) => e.username)]);
 
     // cached numbers first, instantly. then check chess.com for anything new
     if (!(await render())) statusEl.textContent = `${current.baseStatus} Loading recent games…`;
     await sync();
+
+    // upkeep, last so it never holds anything up: old players out, a few old months rechecked.
+    // if a recheck found a corrected month for someone on screen, show the new numbers
+    if (gen !== initGen) return;
+    const { changed } = await maintain(primaryUsername);
+    if (gen === initGen && changed.some((n) => entries.some((e) => e.username === n))) {
+      await render({ final: true });
+    }
   } catch (err) {
     console.error("[Performance] init() failed:", err);
     statusEl.textContent = "Something went wrong - check the popup's console (right-click the extension icon > Inspect popup).";
@@ -930,7 +940,43 @@ document
     init();
   });
 
-document.addEventListener("DOMContentLoaded", init);
+// --- views ---
+// one page, one <section> per view. always opens on overview, nothing remembered
+const VIEWS = ["overview", "race", "methodology"];
+
+function showView(name) {
+  for (const view of VIEWS) {
+    document.getElementById(`view-${view}`).hidden = view !== name;
+  }
+  // the nav button for this view looks pressed. methodology has none, so none do
+  for (const button of document.querySelectorAll("#views button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === name));
+  }
+  // no link to the page you're already on
+  document.getElementById("open-methodology").hidden = name === "methodology";
+}
+
+// one paragraph per METHODOLOGY entry in performance.js
+function renderMethodology() {
+  const container = document.getElementById("methodology");
+  container.innerHTML = "";
+  for (const text of Object.values(METHODOLOGY)) {
+    const p = document.createElement("p");
+    p.textContent = text;
+    container.appendChild(p);
+  }
+}
+
+for (const button of document.querySelectorAll("#views button")) {
+  button.addEventListener("click", () => showView(button.dataset.view));
+}
+document.getElementById("open-methodology").addEventListener("click", () => showView("methodology"));
+
+document.addEventListener("DOMContentLoaded", () => {
+  renderMethodology();
+  showView("overview");
+  init();
+});
 
 // a different tab, or a new url in this one (a game starting or ending), is a different page
 if (chrome.tabs?.onActivated) {

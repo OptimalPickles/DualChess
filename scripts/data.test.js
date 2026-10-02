@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 // data.js uses monthRecords, findGame etc as globals, like in the popup
-Object.assign(globalThis, require("./performance.js"), require("./fairplay.js"));
+Object.assign(globalThis, require("./performance.js"), require("./fairplay.js"), require("./race.js"));
 
 const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7).replace("-", "/");
 const CURRENT = utcMonth(Date.now());
@@ -523,4 +523,148 @@ test("dataAsOf: the older of /stats and the current month, /stats alone if no ga
   storage.store[`monthMeta:me:${CURRENT}`] = { fetchedAt: 1500 };
   assert.equal(await data.dataAsOf("Me"), 1500); // the older one
   data.restoreLog();
+});
+
+// --- step 1.5: storage limits ---
+
+test("playersOfKey: whose data each key is", () => {
+  const data = openPopup(fakeStorage(), fakeServer({}));
+  data.restoreLog();
+  assert.deepEqual(data.playersOfKey("month:me:2020/01"), ["me"]);
+  assert.deepEqual(data.playersOfKey("monthMeta:me:2020/01"), ["me"]);
+  assert.deepEqual(data.playersOfKey("archives:me"), ["me"]);
+  assert.deepEqual(data.playersOfKey("stats:me"), ["me"]);
+  assert.deepEqual(data.playersOfKey("rev:me"), ["me"]);
+  assert.deepEqual(data.playersOfKey("derived:pre:me"), ["me"]);
+  assert.deepEqual(data.playersOfKey("derived:h2h:me:friend"), ["me", "friend"]);
+  assert.deepEqual(data.playersOfKey("primaryUsername"), []);
+  assert.deepEqual(data.playersOfKey("perfSettings"), []);
+});
+
+test("eviction: 31 days unviewed -> removed, 29 kept, the primary never, settings untouched", async () => {
+  const storage = fakeStorage();
+  const now = Date.now();
+  const daysAgo = (d) => now - d * 86400 * 1000;
+  const playerKeys = (n) => ({
+    [`month:${n}:2020/01`]: { games: [] }, [`monthMeta:${n}:2020/01`]: { final: true },
+    [`archives:${n}`]: { months: [] }, [`stats:${n}`]: { stats: {} }, [`derived:pre:${n}`]: { ends: {} },
+  });
+  Object.assign(storage.store, playerKeys("me"), playerKeys("old"), playerKeys("recent"), {
+    "derived:h2h:me:old": { months: {} }, "derived:h2h:me:recent": { months: {} },
+    primaryUsername: "me", perfSettings: { time: "auto" },
+    lastViewed: { me: daysAgo(90), old: daysAgo(31), recent: daysAgo(29) },
+  });
+  const data = openPopup(storage, fakeServer({}));
+  const evicted = await data.evictStalePlayers("me");
+  data.restoreLog();
+  assert.deepEqual(evicted, ["old"]);
+  const keys = Object.keys(storage.store);
+  assert.ok(!keys.some((k) => k.includes("old")), keys.join(", ")); // incl. the h2h vs old
+  assert.ok(keys.includes("month:me:2020/01")); // primary, even at 90 days
+  assert.ok(keys.includes("derived:h2h:me:recent"));
+  assert.ok(keys.includes("perfSettings") && keys.includes("primaryUsername"));
+  assert.equal(storage.store.lastViewed.old, undefined);
+});
+
+test("eviction: data with no lastViewed yet (from before this existed) gets 30 days, not deleted", async () => {
+  const storage = fakeStorage();
+  Object.assign(storage.store, { "month:legacy:2020/01": { games: [] }, "stats:legacy": { stats: {} } });
+  const data = openPopup(storage, fakeServer({}));
+  assert.deepEqual(await data.evictStalePlayers("me"), []);
+  data.restoreLog();
+  assert.ok(storage.store["month:legacy:2020/01"]);
+  assert.ok(Date.now() - storage.store.lastViewed.legacy < 5000);
+});
+
+test("markViewed + maintain: rechecks old months only for the primary and players still kept", async () => {
+  const storage = fakeStorage();
+  const server = fakeServer(twoPlayerRoutes());
+  let data = openPopup(storage, server);
+  await data.fetchPlayerGames("me", () => true);
+  await data.fetchHeadToHead("me", "friend");
+  await data.fetchPlayerGames("friend", () => true);
+  await data.markViewed(["me", "Friend"]);
+  data.restoreLog();
+  // both players' old months were last checked 31 days ago, friend last viewed 31 days ago
+  for (const [k, v] of Object.entries(storage.store)) if (k.startsWith("monthMeta:")) v.checkedAt = Date.now() - 31 * 86400 * 1000;
+  storage.store.lastViewed.friend = Date.now() - 31 * 86400 * 1000;
+
+  data = openPopup(storage, server);
+  const before = server.requests.length;
+  const { evicted, changed } = await data.maintain("me");
+  data.restoreLog();
+  assert.deepEqual(evicted, ["friend"]);
+  assert.deepEqual(changed, []);
+  const rechecked = server.requests.slice(before).map((r) => r.url.replace(API, ""));
+  assert.ok(rechecked.length > 0 && rechecked.every((u) => u.startsWith("/me/")), rechecked.join(", "));
+});
+
+// --- race: journey as a derived cache ---
+
+// me's bullet games: 70 rated in 2020/01, a climb in 2020/02, a few more this month
+function journeyRoutes() {
+  let n = 0;
+  const g = (t, rating, opts = {}) => rawGame(t, {
+    url: `https://www.chess.com/game/live/${++n}`, time_class: "bullet",
+    white: { username: "Me", result: "win", rating }, black: { username: "Friend", result: "resigned", rating: 1500 },
+    ...opts,
+  });
+  const jan = Array.from({ length: 70 }, (_, i) => g(1577836800 + i * 3600, 1500 + (i % 3)));
+  const feb = Array.from({ length: 40 }, (_, i) => g(1580515200 + i * 3600, 1500 + i * 15));
+  const nowS = Math.floor(Date.now() / 1000);
+  const cur = [g(nowS - 7200, 2090), g(nowS - 3600, 2110), g(nowS - 1800, 2105, { rated: false })];
+  return {
+    [`${API}/me/games/archives`]: { body: { archives: ["2020/01", "2020/02", CURRENT].map(monthUrl) }, etag: "a" },
+    [monthUrl("2020/01")]: { body: { games: jan }, etag: "j" },
+    [monthUrl("2020/02")]: { body: { games: feb }, etag: "f" },
+    [monthUrl(CURRENT)]: { body: { games: cur }, etag: "c" },
+  };
+}
+
+test("journey cache: saved through the last finished month, reopen only adds the current month", async () => {
+  const storage = fakeStorage();
+  const server = fakeServer(journeyRoutes());
+  let data = openPopup(storage, server);
+  const first = await data.fetchJourney("me", "bullet");
+  data.restoreLog();
+  const cached = storage.store["derived:journey:me:bullet"];
+  assert.equal(cached.through, "2020/02");
+  assert.equal(cached.state.ratedCount, 110); // jan + feb, not the current month
+  assert.deepEqual([first.ratedCount, first.unratedCount], [112, 1]);
+
+  // the same answer as folding every game from scratch
+  const all = [];
+  for (const m of ["2020/01", "2020/02", CURRENT]) all.push(...(await openPopup(storage, server).fetchMonth("me", m, { cacheOnly: true })));
+  const { rated, ...scratch } = journeyOf(all, Date.now());
+  const { missingMonths, ...fromCache } = first;
+  delete scratch.currentDay; delete fromCache.currentDay; delete fromCache.rated;
+  assert.deepEqual(fromCache, scratch);
+
+  // reopen 10s later: only the current month is checked (a 304)
+  age(storage, 10000);
+  const before = server.requests.length;
+  data = openPopup(storage, server);
+  const again = await data.fetchJourney("me", "bullet");
+  data.restoreLog();
+  const urls = server.requests.slice(before).map((r) => r.url.replace(API, ""));
+  assert.deepEqual(urls.filter((u) => /\/games\/\d/.test(u)), [`/me/games/${CURRENT}`]);
+  assert.equal(again.ratedCount, 112);
+});
+
+test("journey cache: a rev change rebuilds it, a failed month stops the save point", async () => {
+  const storage = fakeStorage();
+  const routes = journeyRoutes();
+  delete routes[monthUrl("2020/02")];
+  let data = openPopup(storage, fakeServer(routes));
+  const j = await data.fetchJourney("me", "bullet");
+  data.restoreLog();
+  assert.deepEqual(j.missingMonths, ["2020/02"]);
+  assert.equal(storage.store["derived:journey:me:bullet"].through, "2020/01"); // not past the gap
+
+  storage.store["rev:me"] = 1; // an old month was corrected
+  data = openPopup(storage, fakeServer(journeyRoutes()));
+  await data.fetchJourney("me", "bullet");
+  data.restoreLog();
+  const after = storage.store["derived:journey:me:bullet"];
+  assert.deepEqual([after.rev, after.through], [1, "2020/02"]);
 });

@@ -101,9 +101,11 @@ const rateable = (games) => games.filter((g) => g.myPre != null && g.oppPre != n
 // for the methodology view
 const METHODOLOGY = {
   preGameRatings:
-    "chess.com records ratings after each game, so we use the ratings from before it. " +
-    "Yours is your previous rated game in that time class. Your opponent's is estimated " +
-    "from your rating change, since chess.com's rating changes aren't exactly zero-sum.",
+    "Chess.com records ratings after each game, so we use the ratings from before it. " +
+    "In a rated game, yours is your rating after your previous rated game in that time class, " +
+    "and your opponent's is estimated from your rating change, since chess.com's rating " +
+    "changes aren't exactly zero-sum. Unrated games don't change ratings, so their recorded " +
+    "ratings are used as they are.",
 };
 
 // chance of scoring vs opp if you're rated R
