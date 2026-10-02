@@ -26,7 +26,9 @@ async function fetchJson(url, etag = null) {
       if (!res.ok) return { status: res.status, data: null, etag: null };
       return { status: res.status, data: await res.json(), etag: res.headers.get("etag") };
     } catch (err) {
-      console.error(`[Performance] fetch ${url} -> failed`, err);
+      // a warning, not an error: reloading the extension cancels in-flight requests, and the
+      // caller already falls back to the cached copy
+      console.warn(`[Performance] fetch ${url} -> failed`, err);
       return { status: 0, data: null, etag: null };
     }
   }
@@ -249,8 +251,71 @@ async function fetchStats(username, { cacheOnly = false } = {}) {
   });
 }
 
+// --- pre-game ratings over the month store ---
+// derived cache derived:pre:<name> = { rev, ends: { "YYYY/MM": { bullet: 2100, ... } } }:
+// the last rated rating per time class at the end of each finished month, so the first
+// game of any month knows the rating before it. tagged with rev like derived:h2h
+
+// state at the end of `month`, carried on from the month before it in the archive.
+// complete = every month back to the first one was loaded. a gap means we don't know
+// the ratings from there, and only complete states get cached (so a gap filled in later counts)
+async function monthEndState(name, month, months, cache, current) {
+  if (cache.ends[month]) return { state: cache.ends[month], complete: true };
+  const records = await fetchMonth(name, month, { cacheOnly: true });
+  if (!records) return { state: {}, complete: false };
+  const i = months.indexOf(month);
+  const before =
+    i > 0
+      ? await monthEndState(name, months[i - 1], months, cache, current)
+      : { state: {}, complete: i === 0 };
+  const state = { ...before.state, ...lastRatedByTimeClass(records) };
+  if (before.complete && month < current) cache.ends[month] = state;
+  return { state, complete: before.complete };
+}
+
+// pre-game numbers for some of a player's months. byMonth: month -> records from fetchMonth,
+// months: their archive list. returns month -> { records, complete }, where complete = the
+// month's starting ratings were all known (so a derived cache can keep it)
+async function withPreGame(username, months, byMonth) {
+  const name = username.toLowerCase();
+  const key = `derived:pre:${name}`;
+  const rev = await getRevision(name);
+  let cache = (await chrome.storage.local.get(key))[key];
+  if (cache?.rev !== rev) cache = { rev, ends: {} };
+  const current = utcMonth(Date.now());
+
+  const out = {};
+  let carry = null; // the month just done, so back-to-back months don't reread storage
+  for (const month of Object.keys(byMonth).sort()) {
+    const i = months.indexOf(month);
+    let start;
+    if (i === 0) start = { state: {}, complete: true };
+    else if (i < 0) start = { state: {}, complete: false };
+    else if (carry?.month === months[i - 1]) start = carry.end;
+    else start = await monthEndState(name, months[i - 1], months, cache, current);
+
+    const { records, end } = preGamePass(byMonth[month], start.state);
+    out[month] = { records, complete: start.complete };
+    carry = { month, end: { state: end, complete: start.complete } };
+    if (start.complete && month < current) cache.ends[month] = end;
+  }
+  await chrome.storage.local.set({ [key]: cache });
+  return out;
+}
+
+// when we last confirmed this player's numbers with chess.com: the older of their /stats
+// check and their current month check (a 304 counts, it confirms nothing changed).
+// a month with no games yet was never fetched, so then it's /stats alone. null = never
+async function dataAsOf(username) {
+  const name = username.toLowerCase();
+  const keys = [`stats:${name}`, `monthMeta:${name}:${utcMonth(Date.now())}`];
+  const stored = await chrome.storage.local.get(keys);
+  const times = keys.map((k) => stored[k]?.fetchedAt).filter((t) => typeof t === "number");
+  return times.length ? Math.min(...times) : null;
+}
+
 // wins/draws from a's side, overall and per time class. games are records from a's side.
-// expected = what the ratings recorded in each game predicted for a
+// expected = what the pre-game ratings of each game predicted for a
 function tallyHeadToHead(a, b, games) {
   const empty = () => ({ aWins: 0, bWins: 0, draws: 0, total: 0 });
   const totals = empty();
@@ -267,8 +332,8 @@ function tallyHeadToHead(a, b, games) {
       else if (g.score === 0) t.bWins++;
       else t.draws++;
     }
-    if (g.rating != null && g.oppRating != null) {
-      expected += expectedScore(g.rating, g.oppRating);
+    if (g.myPre != null && g.oppPre != null) {
+      expected += expectedScore(g.myPre, g.oppPre);
       actual += g.score;
       ratedGames++;
     }
@@ -276,9 +341,19 @@ function tallyHeadToHead(a, b, games) {
   return { a, b, ...totals, byTimeClass, games, vsRatings: { expected, actual, games: ratedGames } };
 }
 
-// a record from the other player's side, turned around to a's side
+// a record from the other player's side, turned around to a's side. their estimate of
+// my pre-game rating becomes my pre-game rating, and the other way round
 function flipSide(r, other) {
-  return { ...r, rating: r.oppRating, oppRating: r.rating, opponent: other, score: 1 - r.score };
+  return {
+    ...r,
+    rating: r.oppRating,
+    oppRating: r.rating,
+    myPre: r.oppPre,
+    oppPre: r.myPre,
+    myChange: r.myChange == null ? null : -r.myChange,
+    opponent: other,
+    score: 1 - r.score,
+  };
 }
 
 // every game between a and b, read from a's months (every game between them is in a's
@@ -301,33 +376,46 @@ async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false 
   const current = utcMonth(Date.now());
 
   const key = `derived:h2h:${a}:${b}`;
-  const revs = `${await getRevision(a)}:${await getRevision(b)}`;
+  // "pre:" so caches from before the pre-game numbers get rebuilt once
+  const revs = `pre:${await getRevision(a)}:${await getRevision(b)}`;
   let cache = (await chrome.storage.local.get(key))[key];
   if (cache?.revs !== revs) cache = { revs, months: {} };
 
   const toRead = shared.filter((m) => !cache.months[m]);
-  const fresh = {};
+  const mineByMonth = {};
+  const theirsByMonth = {};
   const missing = [];
   let incomplete = false;
   let done = 0;
   await Promise.all(
     toRead.map(async (month) => {
-      let vs = null;
       const mine = await fetchMonth(a, month, { cacheOnly });
       if (mine) {
-        vs = mine.filter((g) => g.opponent === b);
+        mineByMonth[month] = mine;
       } else {
         const theirs = await fetchMonth(b, month, { cacheOnly });
-        if (theirs) vs = theirs.filter((g) => g.opponent === a).map((g) => flipSide(g, b));
+        if (theirs) theirsByMonth[month] = theirs;
+        else missing.push(month);
         // cacheOnly: a month neither side has ever loaded
         if (mine === undefined && theirs === undefined) incomplete = true;
       }
-      if (!vs) missing.push(month);
-      else if (month < current) cache.months[month] = vs;
-      else fresh[month] = vs;
       onProgress(++done, toRead.length);
     })
   );
+
+  // pre-game numbers need every one of the player's games that month, not just the ones vs
+  // each other, so they're worked out on the whole month and filtered after
+  const fresh = {};
+  const keep = (month, vs, complete) => {
+    if (month < current && complete) cache.months[month] = vs;
+    else fresh[month] = vs;
+  };
+  for (const [month, m] of Object.entries(await withPreGame(a, monthsA, mineByMonth))) {
+    keep(month, m.records.filter((g) => g.opponent === b), m.complete);
+  }
+  for (const [month, m] of Object.entries(await withPreGame(b, monthsB || [], theirsByMonth))) {
+    keep(month, m.records.filter((g) => g.opponent === a).map((g) => flipSide(g, b)), m.complete);
+  }
   await chrome.storage.local.set({ [key]: cache });
   // from storage alone, a never-loaded month would make the numbers quietly wrong
   if (incomplete) return null;
@@ -345,36 +433,66 @@ async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false 
 
 const GAMES_MAX_MONTHS = 6;
 
-// newest months first, at most 6. needMore(gamesSoFar, month) says whether to load an older one.
-// cacheOnly: null if any month it needs was never loaded, rather than a short list
+// newest months first, at most 6, with pre-game numbers. needMore(gamesSoFar, month) says
+// whether to load an older one. cacheOnly: null if any month it needs was never loaded,
+// rather than a short list
 async function fetchPlayerGames(username, needMore, { cacheOnly = false } = {}) {
   const months = await fetchArchives(username, { cacheOnly });
   if (!months) return null;
 
-  let games = [];
+  const byMonth = {};
+  let raw = [];
   for (const month of [...months].reverse().slice(0, GAMES_MAX_MONTHS)) {
     const got = await fetchMonth(username, month, { cacheOnly });
     if (got === undefined) return null;
-    games = games.concat(got || []);
-    if (!needMore(games, month)) break;
+    // a month chess.com failed on stays out, so the next month doesn't think it had no games
+    if (got) byMonth[month] = got;
+    raw = raw.concat(got || []);
+    if (!needMore(raw, month)) break;
   }
+
+  const annotated = await withPreGame(username, months, byMonth);
+  const games = Object.keys(annotated)
+    .sort()
+    .reverse()
+    .flatMap((m) => annotated[m].records);
 
   console.log(`[Performance] fetchPlayerGames("${username}"): ${games.length} games`);
   return games;
 }
 
-// time class of one live game by id. undocumented endpoint, but it works for
-// games still in progress (not in the archives yet). cached per game
-async function fetchGameTimeClass(gameId, { cacheOnly = false } = {}) {
-  const key = `gameTc:${gameId}`;
-  const cached = (await chrome.storage.session.get(key))[key];
-  if (cached || cacheOnly) return cached ?? null;
+// fair play gate. is the game on this page finished? only if its id is in a player's
+// archive: this month and last, straight from chess.com (an empty month is just
+// { games: [] }, and last month is cached for good once it's over), plus, the first time
+// we see a page, every other month already in storage (no requests). returns the record or null
+async function findGameInArchive(username, page, { scanCached = false } = {}) {
+  const now = new Date();
+  const current = utcMonth(now.getTime());
+  const previous = utcMonth(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  for (const month of [current, previous]) {
+    const found = findGame((await fetchMonth(username, month)) || [], page);
+    if (found) return found;
+  }
+  if (!scanCached) return null;
 
-  const { data } = await fetchJson(`https://www.chess.com/callback/live/game/${gameId}`);
-  const timeClass = classifyTimeControl(data?.game?.pgnHeaders?.TimeControl);
-  console.log(`[Performance] game ${gameId} time class:`, timeClass);
-  if (timeClass) await chrome.storage.session.set({ [key]: timeClass });
-  return timeClass;
+  const listed = (await fetchArchives(username, { cacheOnly: true })) || [];
+  for (const month of listed) {
+    if (month === current || month === previous) continue;
+    const found = findGame((await fetchMonth(username, month, { cacheOnly: true })) || [], page);
+    if (found) return found;
+  }
+  return null;
+}
+
+// { locked, record } for the page on screen. only one player's archive is checked:
+// yours when you're playing, so a locked game never makes requests about your opponent
+async function checkGameLock(page, onPage, primary, opts = {}) {
+  if (page.kind === "other") return { locked: false, record: null };
+  if (page.kind === "play") return { locked: true, record: null };
+  const user = lockCheckUser(onPage, primary);
+  const record = user ? await findGameInArchive(user, page, opts) : null;
+  console.log(`[Performance] fair play: game ${page.id} ${record ? "finished" : "in progress (locked)"}, checked ${user}`);
+  return { locked: isGameInProgress(page, record), record };
 }
 
 // time class of the latest game between a and b.
@@ -431,7 +549,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     fetchJson, fetchArchives, fetchMonth, pickMonthsToRevalidate,
     revalidateFinishedMonths, getRevision, migrateStorage, fetchStats,
-    tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames,
-    latestHeadToHeadTimeClass, fetchPlayerHistory,
+    tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames, withPreGame, dataAsOf,
+    latestHeadToHeadTimeClass, fetchPlayerHistory, findGameInArchive, checkGameLock,
   };
 }

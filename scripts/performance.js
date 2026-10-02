@@ -59,17 +59,65 @@ function gameUrl(record) {
   return `https://www.chess.com/game/${kind}/${record.id}`;
 }
 
+// --- pre-game ratings ---
+// chess.com records ratings AFTER the game, which leans every expected score toward
+// whoever actually won. so each record also gets the ratings from BEFORE it:
+//   rated games:
+//     myPre:    my previous rated game's rating in this time class (null for my first one)
+//     myChange: rating - myPre
+//     oppPre:   oppRating + myChange (their change taken as the mirror of mine)
+//   unrated games don't move ratings, so what's recorded already is the pre-game rating:
+//     myPre = rating, myChange = 0, oppPre = oppRating
+
+// last rated rating per time class in some records
+function lastRatedByTimeClass(records) {
+  const last = {};
+  const sorted = [...records].sort((a, b) => a.t - b.t || a.id - b.id);
+  for (const r of sorted) if (r.rated) last[r.timeClass] = r.rating;
+  return last;
+}
+
+// one player's records, oldest first, with their pre-game numbers.
+// start = last rated rating per time class before the first record ({} = unknown).
+// returns { records, end } where end carries on into the next month
+function preGamePass(records, start = {}) {
+  const last = { ...start };
+  const out = [...records]
+    .sort((a, b) => a.t - b.t || a.id - b.id)
+    .map((r) => {
+      if (!r.rated) return { ...r, myPre: r.rating, myChange: 0, oppPre: r.oppRating };
+      const myPre = last[r.timeClass] ?? null;
+      const myChange = myPre == null ? null : r.rating - myPre;
+      const oppPre = myChange == null ? null : r.oppRating + myChange;
+      last[r.timeClass] = r.rating;
+      return { ...r, myPre, myChange, oppPre };
+    });
+  return { records: out, end: last };
+}
+
+// games that have pre-game numbers. a first rated game has nothing before it, so it's skipped
+const rateable = (games) => games.filter((g) => g.myPre != null && g.oppPre != null);
+
+// for the methodology view
+const METHODOLOGY = {
+  preGameRatings:
+    "chess.com records ratings after each game, so we use the ratings from before it. " +
+    "Yours is your previous rated game in that time class. Your opponent's is estimated " +
+    "from your rating change, since chess.com's rating changes aren't exactly zero-sum.",
+};
+
 // chance of scoring vs opp if you're rated R
 function expectedScore(R, opp) {
   return 1 / (1 + Math.pow(10, (opp - R) / 400));
 }
 
-// the R where expected score = actual score
-function performanceRating(games) {
+// the R where expected score = actual score, against opponents' pre-game ratings
+function performanceRating(allGames) {
+  const games = rateable(allGames);
   if (!games.length) return null;
 
   const actual = games.reduce((sum, g) => sum + g.score, 0);
-  const ratings = games.map((g) => g.oppRating);
+  const ratings = games.map((g) => g.oppPre);
 
   // no finite answer at 100% or 0%, so cap it
   if (actual === games.length) return Math.max(...ratings) + PERF_CONFIG.perfectScoreOffset;
@@ -88,10 +136,11 @@ function performanceRating(games) {
 }
 
 // ± on R. more games and closer matchups -> smaller error
-function ratingError(games, R) {
+function ratingError(allGames, R) {
+  const games = rateable(allGames);
   if (!games.length || R == null) return null;
   const info = games.reduce((sum, g) => {
-    const E = expectedScore(R, g.oppRating);
+    const E = expectedScore(R, g.oppPre);
     return sum + E * (1 - E);
   }, 0);
   if (info === 0) return Infinity;
@@ -106,7 +155,8 @@ function confidenceLabel(value) {
 
 // freshness * precision. old games and few games both drag it down.
 // a stable player's old games still say a lot about them, so their half-life stretches
-function confidence(games, R, now, timeClass, stabilityValue = 0) {
+function confidence(allGames, R, now, timeClass, stabilityValue = 0) {
+  const games = rateable(allGames);
   if (!games.length || R == null) return null;
 
   const baseHalfLife = PERF_CONFIG.halfLifeDays[timeClass] ?? PERF_CONFIG.halfLifeDays.blitz;
@@ -256,6 +306,10 @@ if (typeof module !== "undefined") {
     PERF_CONFIG,
     monthRecords,
     gameUrl,
+    lastRatedByTimeClass,
+    preGamePass,
+    rateable,
+    METHODOLOGY,
     expectedScore,
     performanceRating,
     ratingError,

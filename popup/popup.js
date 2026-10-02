@@ -1,4 +1,5 @@
-// flow: scrape tab -> get/ask primary -> figure out mode -> render() from cache right away,
+// flow: scrape tab -> fair play lock (in-progress game = show nothing) -> get/ask primary ->
+// figure out mode -> render() from cache right away,
 // then sync() from chess.com in the background (and every 60s), re-rendering only on changes
 // logs start with "[Performance]". popup logs: right-click icon > Inspect popup.
 // scrapeChessPage logs show in the chess.com tab's own console
@@ -250,25 +251,16 @@ function pickTimeClass(stats) {
   return best?.tc ?? null;
 }
 
-// "/game/live/123", "/game/daily/123", "/game/123", "/analysis/game/live/123"
-function parseGameUrl(url) {
-  const m = url?.match(/\/game\/(?:(live|daily)\/)?(\d+)/);
-  return m ? { id: m[2], daily: m[1] === "daily" } : null;
-}
-
 // "auto": the game on the page, else the last game between the two, else /stats.
 // /stats is only meant for profile pages, the rest just land there if nothing else works
 async function resolveTimeClass(settings, results) {
   const opt = { cacheOnly: true };
   if (settings.time !== "auto") return { timeClass: settings.time, source: null };
 
-  const { mode, game, pair } = current;
+  const { mode, gameRecord, pair } = current;
+  // a finished game on the page: its own record, found by id when the lock was checked
+  if (gameRecord) return { timeClass: gameRecord.timeClass, source: "this game" };
   if (mode === "playing" || mode === "spectating") {
-    if (game?.daily) return { timeClass: "daily", source: "this game" };
-    if (game) {
-      const tc = await fetchGameTimeClass(game.id, opt);
-      if (tc) return { timeClass: tc, source: "this game" };
-    }
     const tc = await latestHeadToHeadTimeClass(pair[0], pair[1], opt);
     if (tc) return { timeClass: tc, source: "last game between them" };
   }
@@ -361,7 +353,8 @@ async function loadPerformance(username, data, now, settings, timeClass) {
   const result = {
     timeClass,
     range,
-    count: games.length,
+    // games the numbers came from (a first rated game has no pre-game rating, so it's skipped)
+    count: rateable(games).length,
     perf,
     error: ratingError(games, perf),
     conf: confidence(games, perf, now, timeClass, stab.stability),
@@ -610,6 +603,14 @@ function renderHeadToHead(container, h2h, pending) {
   container.appendChild(recent);
 }
 
+// "3:42 PM" today, "Sep 30, 3:42 PM" before that
+function formatAsOf(ms, now) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === new Date(now).toDateString()) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+}
+
 // --- render from cache, sync from chess.com -------------------------------
 // render() never touches the network. it builds everything from storage and only
 // redraws when the numbers changed. sync() is the only thing that makes requests,
@@ -633,9 +634,13 @@ async function buildView() {
   const h2hAll = pair ? await fetchHeadToHead(pair[0], pair[1], () => {}, opt) : null;
   const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, now);
 
+  // the older of the players' last confirmed times, so it never claims more than the staler card
+  const asOfs = await Promise.all(entries.map((entry) => dataAsOf(entry.username)));
+  const asOf = asOfs.every((t) => t != null) ? Math.min(...asOfs) : null;
+
   // complete = every card has real numbers, not "not loaded yet"
   const complete = results.every(Boolean) && perfs.every(Boolean);
-  return { settings, results, timeClass, source, now, perfs, pred, h2h, complete };
+  return { settings, results, timeClass, source, now, perfs, pred, h2h, asOf, complete };
 }
 
 // the numbers on screen, minus anything that only moves because the clock moved,
@@ -654,6 +659,8 @@ function viewSignature(view) {
   return JSON.stringify({
     settings: view.settings, timeClass: view.timeClass, source: view.source,
     h2hSynced: Boolean(current.h2hSynced),
+    // to the minute, so a sync that only confirmed nothing changed still moves the time
+    asOf: view.asOf == null ? null : Math.floor(view.asOf / 60000),
     stats: view.results.map(ratings),
     perfs: view.perfs.map(perf),
     h2h: h && [h.total, h.aWins, h.draws, h.bWins, h.last30.total, h.games[0]?.t ?? null],
@@ -693,6 +700,7 @@ async function render({ final = false } = {}) {
     renderPlayer(container, entries[i]?.label, entries[i]?.username, results[i]);
     if (entries[i]) renderPerformance(container, perfs[i], now);
   });
+  document.getElementById("data-as-of").textContent = view.asOf ? `Data as of ${formatAsOf(view.asOf, now)}` : "";
 
   const pending = Boolean(pair) && !h2h && !current.h2hSynced;
   renderPrediction(document.getElementById("prediction"), pred, h2h, pending);
@@ -705,8 +713,8 @@ async function render({ final = false } = {}) {
 
 let syncGen = 0;
 
-// the only place that asks chess.com for anything: /stats, the newest 6 months of each
-// player, this game's time class, and the h2h months. mostly 304s after the first time.
+// the only place that asks chess.com for anything (besides the fair play check): /stats,
+// the newest 6 months of each player, and the h2h months. mostly 304s after the first time.
 // stats -> recent games -> render -> head-to-head -> render
 async function sync() {
   if (!current) return;
@@ -714,14 +722,13 @@ async function sync() {
   const stale = () => gen !== syncGen;
   clearTimeout(refreshTimer);
 
-  const { entries, pair, game, baseStatus } = current;
+  const { entries, pair, baseStatus } = current;
   const statusEl = document.getElementById("status");
   let ok = true;
 
   try {
     const stats = await Promise.all(entries.map((entry) => fetchStats(entry.username)));
     const games = await Promise.all(entries.map((entry) => fetchPlayerGames(entry.username, () => true)));
-    if (game && !game.daily) await fetchGameTimeClass(game.id);
     if (stale()) return;
     ok = stats.every(Boolean) && games.every(Boolean);
     statusEl.textContent = baseStatus;
@@ -752,7 +759,25 @@ async function sync() {
   refreshTimer = setTimeout(() => sync(), refreshDelay);
 }
 
+// bumped by every init(). a tab change mid-way means an older init stops where it is
+let initGen = 0;
+// game ids whose stored months were already searched once, see findGameInArchive
+const scannedGames = new Set();
+
+// fair play lock: every view is replaced by one line, and the only thing still running
+// is the lock check itself, every 60s (and on tab changes)
+function showLocked() {
+  current = null;
+  document.body.classList.add("locked");
+  document.getElementById("status").textContent = LOCKED_TEXT;
+  for (const id of ["primary-info", "opponent-info", "prediction", "h2h"]) {
+    document.getElementById(id).innerHTML = "";
+  }
+  refreshTimer = setTimeout(() => init(), REFRESH_MS);
+}
+
 async function init() {
+  const gen = ++initGen;
   const statusEl = document.getElementById("status");
   const changeAccountBtn = document.getElementById("change-account");
   const controls = document.getElementById("controls");
@@ -760,11 +785,16 @@ async function init() {
 
   current = null;
   clearTimeout(refreshTimer);
+  // anything still running from before can't draw over this
+  syncGen++;
+  renderGen++;
+  document.body.classList.remove("locked");
   changeAccountBtn.hidden = true;
   controls.hidden = true;
   restartBtn.hidden = true;
   document.getElementById("h2h").innerHTML = "";
   document.getElementById("prediction").innerHTML = "";
+  document.getElementById("data-as-of").textContent = "";
 
   document.body.classList.add("is-loading");
 
@@ -773,6 +803,7 @@ async function init() {
     await migrateStorage();
 
     const tabData = await getActiveChessTabData();
+    if (gen !== initGen) return;
     console.log("[Performance] Active tab + scrape result:", tabData);
 
     if (!tabData) {
@@ -781,7 +812,26 @@ async function init() {
       return;
     }
 
+    // fair play: decided from the url and usernames alone, before anything about the
+    // game is fetched or shown. a play url with no id can still carry one in its canonical link
+    let page = parsePage(tabData.tab.url);
+    const fromCanonical = parsePage(tabData.scraped.canonicalHref);
+    if (page.kind === "play" && fromCanonical.kind === "game") page = fromCanonical;
+    const saved =
+      (await chrome.storage.local.get(STORAGE_KEY_PRIMARY_USERNAME))[STORAGE_KEY_PRIMARY_USERNAME] ?? null;
+    const onPage = tabData.scraped.playersOnPage.map((p) => p.username);
+    // the full search of stored months only has to happen once per game
+    const scanCached = page.kind === "game" && !scannedGames.has(page.id);
+    if (scanCached) scannedGames.add(page.id);
+    const lock = await checkGameLock(page, onPage, saved, { scanCached });
+    if (gen !== initGen) return;
+    if (lock.locked) {
+      showLocked();
+      return;
+    }
+
     const primaryUsername = await getPrimaryUsername(tabData.scraped.playersOnPage);
+    if (gen !== initGen) return;
 
     if (!primaryUsername) {
       statusEl.textContent = "No username set - try again.";
@@ -835,8 +885,7 @@ async function init() {
     controls.hidden = false;
     restartBtn.hidden = false;
 
-    const game = parseGameUrl(tabData.tab.url) ?? parseGameUrl(tabData.scraped.canonicalHref);
-    current = { entries, pair, mode, game, baseStatus: statusEl.textContent };
+    current = { entries, pair, mode, gameRecord: lock.record, baseStatus: statusEl.textContent };
     lastSignature = null;
 
     // cached numbers first, instantly. then check chess.com for anything new
@@ -882,6 +931,14 @@ document
   });
 
 document.addEventListener("DOMContentLoaded", init);
+
+// a different tab, or a new url in this one (a game starting or ending), is a different page
+if (chrome.tabs?.onActivated) {
+  chrome.tabs.onActivated.addListener(() => init());
+  chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+    if (tab.active && info.url) init();
+  });
+}
 
 // suggestions:
 // - "spectating" only compares the first two names found. a third name on the page gets ignored

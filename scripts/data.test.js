@@ -4,8 +4,8 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-// data.js uses summarizeForPlayer etc as globals, like in the popup
-Object.assign(globalThis, require("./performance.js"));
+// data.js uses monthRecords, findGame etc as globals, like in the popup
+Object.assign(globalThis, require("./performance.js"), require("./fairplay.js"));
 
 const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7).replace("-", "/");
 const CURRENT = utcMonth(Date.now());
@@ -374,4 +374,153 @@ test("one sync never asks for the same current month twice (5s freshness)", asyn
   const urls = server.requests.slice(before).map((r) => r.url.replace(API, ""));
   // only friend's archives list. me's current month was fetched a moment ago
   assert.deepEqual(urls, ["/friend/games/archives"]);
+});
+
+// --- phase 2: fair play lock ---
+
+const PREVIOUS = (() => { const d = new Date(); return utcMonth(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)); })();
+const livePage = (id) => ({ kind: "game", id, type: "live" });
+
+// me's current month has game 101 (finished). 202 is still being played
+function lockRoutes() {
+  return {
+    [monthUrl(CURRENT)]: { body: { games: [rawGame(1, { url: "https://www.chess.com/game/live/101" })] }, etag: "c1" },
+    [monthUrl(PREVIOUS)]: { body: { games: [] }, etag: "p1" },
+    [`${API}/me/games/archives`]: { body: { archives: [monthUrl("2020/01"), monthUrl(PREVIOUS), monthUrl(CURRENT)] }, etag: "a" },
+    [monthUrl("2020/01")]: { body: { games: [rawGame(2, { url: "https://www.chess.com/game/live/55" })] }, etag: "old" },
+  };
+}
+
+test("lock: game id in your current month -> unlocked, with its own record", async () => {
+  const server = fakeServer(lockRoutes());
+  const data = openPopup(fakeStorage(), server);
+  const lock = await data.checkGameLock(livePage(101), ["me", "friend"], "me");
+  data.restoreLog();
+  assert.equal(lock.locked, false);
+  assert.equal(lock.record.id, 101);
+  assert.equal(lock.record.timeClass, "bullet"); // where "auto" gets this game's time class
+});
+
+test("lock: game id not in the archive -> locked, and nothing asked about the opponent", async () => {
+  const server = fakeServer(lockRoutes());
+  const data = openPopup(fakeStorage(), server);
+  const lock = await data.checkGameLock(livePage(202), ["friend", "me"], "me"); // opponent shown first
+  data.restoreLog();
+  assert.equal(lock.locked, true);
+  assert.equal(lock.record, null);
+  assert.ok(server.requests.length > 0);
+  assert.ok(server.requests.every((r) => r.url.startsWith(`${API}/me/`)), server.requests.map((r) => r.url).join(", "));
+});
+
+test("lock: play page with no game id -> locked, no requests at all", async () => {
+  const server = fakeServer(lockRoutes());
+  const data = openPopup(fakeStorage(), server);
+  const lock = await data.checkGameLock({ kind: "play" }, ["me", "friend"], "me");
+  data.restoreLog();
+  assert.equal(lock.locked, true);
+  assert.equal(server.requests.length, 0);
+});
+
+test("lock: the game shows up on the next refresh -> unlocks", async () => {
+  const storage = fakeStorage();
+  const routes = lockRoutes();
+  const server = fakeServer(routes);
+  let data = openPopup(storage, server);
+  assert.equal((await data.checkGameLock(livePage(202), ["me"], "me")).locked, true);
+  data.restoreLog();
+
+  // game 202 ends, a minute later the next check runs
+  routes[monthUrl(CURRENT)] = {
+    body: { games: [rawGame(1, { url: "https://www.chess.com/game/live/101" }), rawGame(3, { url: "https://www.chess.com/game/live/202" })] },
+    etag: "c2",
+  };
+  age(storage, 60000);
+  data = openPopup(storage, server);
+  const lock = await data.checkGameLock(livePage(202), ["me"], "me");
+  data.restoreLog();
+  assert.equal(lock.locked, false);
+  assert.equal(lock.record.id, 202);
+});
+
+test("lock: an old finished game is found in stored months once, with no request for that month", async () => {
+  const storage = fakeStorage();
+  const server = fakeServer(lockRoutes());
+  let data = openPopup(storage, server);
+  await data.fetchArchives("me");
+  await data.fetchMonth("me", "2020/01"); // in storage from earlier use
+  data.restoreLog();
+  const before = server.requests.length;
+  age(storage, 10000);
+  data = openPopup(storage, server);
+  const lock = await data.checkGameLock(livePage(55), ["me"], "me", { scanCached: true });
+  data.restoreLog();
+  assert.equal(lock.locked, false);
+  assert.ok(!server.requests.slice(before).some((r) => r.url.endsWith("/2020/01")));
+});
+
+// --- pre-game ratings over the month store ---
+
+// me: a rated bullet game at 2092 in 2020/01, then a win to 2100 vs friend (recorded 1692) in 2020/02
+function preRoutes() {
+  const g = (t, myRating, oppRating, opts = {}) => rawGame(t, {
+    url: `https://www.chess.com/game/live/${t}`,
+    white: { username: "Me", result: "win", rating: myRating },
+    black: { username: "Friend", result: "resigned", rating: oppRating },
+    ...opts,
+  });
+  return {
+    [`${API}/me/games/archives`]: { body: { archives: ["2020/01", "2020/02", "2020/03"].map(monthUrl) }, etag: "a" },
+    [`${API}/friend/games/archives`]: { body: { archives: ["2020/01", "2020/02"].map((m) => `${API}/friend/games/${m}`) }, etag: "fa" },
+    [monthUrl("2020/01")]: { body: { games: [g(1, 2092, 2000)] }, etag: "1" },
+    [monthUrl("2020/02")]: { body: { games: [g(2, 2100, 1692)] }, etag: "2" },
+    [monthUrl("2020/03")]: { body: { games: [g(3, 2105, 1800)] }, etag: "3" },
+  };
+}
+
+test("pre-game numbers carry across months, cached as derived:pre tagged with rev", async () => {
+  const storage = fakeStorage();
+  const data = openPopup(storage, fakeServer(preRoutes()));
+  const games = await data.fetchPlayerGames("me", () => true);
+  data.restoreLog();
+  const byT = Object.fromEntries(games.map((g) => [g.t, g]));
+  assert.equal(byT[1].myPre, null); // first rated game ever
+  assert.deepEqual([byT[2].myPre, byT[2].myChange, byT[2].oppPre], [2092, 8, 1700]); // from 2020/01's end
+  assert.equal(byT[3].myPre, 2100);
+  assert.deepEqual(storage.store["derived:pre:me"].ends["2020/01"], { bullet: 2092 });
+  assert.equal(storage.store["derived:pre:me"].rev, 0);
+});
+
+test("h2h expected total uses pre-game ratings and skips a first rated game", async () => {
+  const data = openPopup(fakeStorage(), fakeServer(preRoutes()));
+  const h = await data.fetchHeadToHead("me", "friend");
+  data.restoreLog();
+  assert.equal(h.total, 2);
+  assert.equal(h.vsRatings.games, 1); // the 2020/01 game has no rating before it
+  const expected = 1 / (1 + Math.pow(10, (1700 - 2092) / 400));
+  assert.ok(Math.abs(h.vsRatings.expected - expected) < 1e-9);
+});
+
+test("a month chess.com failed on breaks the chain instead of counting as 'no games'", async () => {
+  const routes = preRoutes();
+  delete routes[monthUrl("2020/02")];
+  const storage = fakeStorage();
+  const data = openPopup(storage, fakeServer(routes));
+  const games = await data.fetchPlayerGames("me", () => true);
+  data.restoreLog();
+  const march = games.find((g) => g.t === 3);
+  assert.equal(march.myPre, null); // february unknown, so march's starting rating is unknown
+  assert.equal(storage.store["derived:pre:me"].ends["2020/03"], undefined); // not cached as if complete
+});
+
+// --- step 1.4: data as of ---
+
+test("dataAsOf: the older of /stats and the current month, /stats alone if no games this month", async () => {
+  const storage = fakeStorage();
+  const data = openPopup(storage, fakeServer({}));
+  assert.equal(await data.dataAsOf("me"), null); // never fetched
+  storage.store["stats:me"] = { stats: {}, fetchedAt: 2000 };
+  assert.equal(await data.dataAsOf("me"), 2000); // no current month yet
+  storage.store[`monthMeta:me:${CURRENT}`] = { fetchedAt: 1500 };
+  assert.equal(await data.dataAsOf("Me"), 1500); // the older one
+  data.restoreLog();
 });

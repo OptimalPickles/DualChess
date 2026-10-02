@@ -43,6 +43,8 @@
         <div id="results">
             <div id="primary-info" class="player-card"></div>
             <div id="opponent-info" class="player-card"></div>
+            <!-- when we last confirmed these numbers with chess.com -->
+            <p id="data-as-of"></p>
             <div id="prediction"></div>
             <div id="h2h"></div>
         </div>
@@ -50,8 +52,9 @@
         <button id="restart-tally" type="button" hidden>Restart session tally</button>
         <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
 
-        <!-- performance.js, then data.js, then popup.js. each uses the ones before it -->
+        <!-- performance.js, fairplay.js, then data.js, then popup.js. each uses the ones before it -->
         <script src="../scripts/performance.js"></script>
+        <script src="../scripts/fairplay.js"></script>
         <script src="../scripts/data.js"></script>
         <script src="popup.js"></script>
     </body>

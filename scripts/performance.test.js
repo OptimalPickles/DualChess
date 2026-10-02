@@ -7,9 +7,12 @@ const NOW = Date.UTC(2026, 8, 30, 12, 0); // fixed so ages don't drift
 const NOW_S = NOW / 1000;
 const DAY = 86400;
 
-// a month record, from the player's side
-const game = (oppRating, score, extra = {}) => ({
-  oppRating,
+// a month record that's been through preGamePass, from the player's side.
+// oppPre = the opponent's rating going into the game, which is what the math uses
+const game = (oppPre, score, extra = {}) => ({
+  oppRating: oppPre,
+  oppPre,
+  myPre: 1500,
   score,
   t: NOW_S - 60,
   timeClass: "bullet",
@@ -209,4 +212,56 @@ test("gameUrl rebuilds live and daily urls from the id", () => {
   const daily = rawGame({ time_class: "daily", url: "https://www.chess.com/game/daily/993746602" });
   const record = p.monthRecords([daily], "me")[0];
   assert.equal(p.gameUrl(record), daily.url);
+});
+
+// --- pre-game ratings ---
+
+const rec = (t, rating, oppRating, opts = {}) => ({ id: t, t, rating, oppRating, rated: true, timeClass: "bullet", score: 1, ...opts });
+
+test("pre-game: a win from 2092 to 2100 vs a recorded 1692 -> oppPre 1700", () => {
+  const { records } = p.preGamePass([rec(1, 2092, 2000), rec(2, 2100, 1692)]);
+  const win = records[1];
+  assert.deepEqual([win.myPre, win.myChange, win.oppPre], [2092, 8, 1700]);
+});
+
+test("pre-game: an unrated game -> oppPre = oppRating, and it doesn't move myPre", () => {
+  const { records } = p.preGamePass([
+    rec(1, 2092, 2000),
+    rec(2, 2092, 1650, { rated: false }),
+    rec(3, 2100, 1692),
+  ]);
+  assert.equal(records[1].oppPre, 1650);
+  assert.equal(records[1].myPre, 2092);
+  assert.equal(records[2].myPre, 2092); // still the last RATED game
+});
+
+test("pre-game: unrated games use their own recorded rating, even with no rated game before", () => {
+  // all unrated, like an unrated-only bullet player: none get skipped
+  const { records } = p.preGamePass([
+    rec(1, 2100, 2050, { rated: false }),
+    rec(2, 2100, 1980, { rated: false }),
+  ]);
+  assert.deepEqual(records.map((r) => [r.myPre, r.myChange, r.oppPre]), [[2100, 0, 2050], [2100, 0, 1980]]);
+  assert.equal(p.rateable(records).length, 2);
+});
+
+test("pre-game: a player's first rated game is excluded", () => {
+  const { records } = p.preGamePass([rec(1, 1200, 1100), rec(2, 1210, 1150)]);
+  assert.equal(records[0].myPre, null);
+  assert.equal(records[0].oppPre, null);
+  assert.equal(p.rateable(records).length, 1);
+  // so performance only uses the second game: a win vs 1150 + 10 = 1160 -> 1560
+  assert.equal(p.performanceRating(records), 1560);
+});
+
+test("pre-game: time classes don't mix, and the end state carries into the next month", () => {
+  const { records, end } = p.preGamePass(
+    [rec(1, 2092, 2000), rec(2, 1500, 1400, { timeClass: "blitz" }), rec(3, 2100, 1692)],
+    { blitz: 1490 }
+  );
+  assert.equal(records[1].myPre, 1490); // blitz starts from the earlier month's state
+  assert.equal(records[2].myPre, 2092); // bullet ignores the blitz game in between
+  assert.deepEqual(end, { blitz: 1500, bullet: 2100 });
+  const next = p.preGamePass([rec(4, 2110, 1700)], end).records[0];
+  assert.equal(next.myPre, 2100);
 });

@@ -155,3 +155,18 @@ body.is-loading #change-account {
   color: #999;
   font-weight: normal;
 }
+
+/* fair play lock: a game is in progress, so nothing but the status line shows */
+body.locked #controls,
+body.locked #who-are-you,
+body.locked #results,
+body.locked #restart-tally,
+body.locked #change-account {
+  display: none;
+}
+
+#data-as-of {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #777;
+}
