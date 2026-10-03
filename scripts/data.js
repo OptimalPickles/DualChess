@@ -308,7 +308,9 @@ async function fetchStats(username, { cacheOnly = false } = {}) {
   const name = username.toLowerCase();
   const url = `${API}/${encodeURIComponent(name)}/stats`;
   const key = `stats:${name}`;
-  const view = (c) => (c ? { stats: c.stats, fetchedAt: c.fetchedAt } : null);
+  // a player chess.com said doesn't exist reads as null here, like a failure. playerMissing()
+  // tells the two apart
+  const view = (c) => (c && !c.notFound ? { stats: c.stats, fetchedAt: c.fetchedAt } : null);
   if (cacheOnly) return view((await chrome.storage.local.get(key))[key]);
 
   return shared(url, async () => {
@@ -319,12 +321,24 @@ async function fetchStats(username, { cacheOnly = false } = {}) {
       await chrome.storage.local.set({ [key]: { ...cached, fetchedAt: now } });
       return view({ ...cached, fetchedAt: now });
     }
+    // 404: no such player (a typo, or a closed account). saved, so a reopen knows without asking.
+    // the next successful fetch replaces it
+    if (res.status === 404 || res.status === 410) {
+      await chrome.storage.local.set({ [key]: { notFound: true, fetchedAt: now } });
+      return null;
+    }
     if (!res.data) return view(cached);
 
     const fresh = { stats: res.data, etag: res.etag, fetchedAt: now };
     await chrome.storage.local.set({ [key]: fresh });
     return view(fresh);
   });
+}
+
+// true when chess.com's last answer for this player was "no such player"
+async function playerMissing(username) {
+  const key = `stats:${username.toLowerCase()}`;
+  return Boolean((await chrome.storage.local.get(key))[key]?.notFound);
 }
 
 // --- pre-game ratings over the month store ---
@@ -735,7 +749,7 @@ async function fetchJourney(username, timeClass, { cacheOnly = false, onProgress
 if (typeof module !== "undefined") {
   module.exports = {
     fetchJson, fetchArchives, fetchMonth, pickMonthsToRevalidate,
-    revalidateFinishedMonths, getRevision, migrateStorage, fetchStats,
+    revalidateFinishedMonths, getRevision, migrateStorage, fetchStats, playerMissing,
     tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames, withPreGame, dataAsOf,
     playersOfKey, pickPlayersToEvict, markViewed, evictStalePlayers, maintain, fetchJourney,
     estimateHistory, recentRecords,

@@ -821,6 +821,65 @@ function shadowSummary(records, { leaveOutRivals = RACE_CONFIG.leaveOutRivals } 
   };
 }
 
+// --- shadow rating over time windows ---
+// how the shadow moved in the last 30 days, 90 days, 1 year, and all time, next to the
+// official rating over the same stretch. days: null = all time
+const SHADOW_WINDOWS = [
+  { label: "30 days", days: 30 },
+  { label: "90 days", days: 90 },
+  { label: "1 year", days: 365 },
+  { label: "All time", days: null },
+];
+const SHADOW_OUTDATED_DAYS = 60; // an anchor further back than this before the window may be stale
+const SHADOW_SETTLING_GAMES = 100; // fewer games replayed since the anchor than this: still settling
+
+// anchor = my last rated game at or before the window start. the games between it and the
+// start are a warm-up, so the shadow is already going when the window opens. no rated game
+// before the start: the first rated game inside it. all time: rated game 60 (end of
+// placement), or the first rated game for someone who hasn't played 60.
+// records: one time class, oldest first, with pre-game numbers. K from calibrateK
+function shadowWindow(records, days, now, K, { leaveOutRivals = RACE_CONFIG.leaveOutRivals } = {}) {
+  const nowS = now / 1000;
+  const startT = days == null ? null : nowS - days * 86400;
+  const inWindow = records.filter((g) => startT == null || g.t > startT);
+  if (!inWindow.length) return { empty: true };
+
+  const ratedIndexes = records.map((g, i) => (g.rated ? i : -1)).filter((i) => i >= 0);
+  let anchorIndex;
+  if (startT == null) anchorIndex = placementAnchorIndex(records) ?? ratedIndexes[0];
+  else anchorIndex = ratedIndexes.filter((i) => records[i].t <= startT).at(-1) ?? ratedIndexes.find((i) => records[i].t > startT);
+  if (anchorIndex == null) return { noRated: true };
+
+  const anchor = records[anchorIndex];
+  const replay = shadowReplay(records, K, { anchorIndex, leaveOutRivals });
+  // the window opens at its start, or at the anchor when the anchor is inside it
+  const openT = Math.max(startT ?? anchor.t, anchor.t);
+  const shadowStart = replay.steps.filter((st) => st.t <= openT).at(-1)?.after ?? replay.start;
+  const officialStart = records[ratedIndexes.filter((i) => records[i].t <= openT).at(-1)].rating;
+  const officialNow = records[ratedIndexes.at(-1)].rating;
+
+  const flags = [];
+  const gapDays = ((startT ?? anchor.t) - anchor.t) / 86400;
+  if (gapDays > SHADOW_OUTDATED_DAYS) {
+    flags.push(`Starting rating is from ${Math.round(gapDays / 30)} months earlier and may be outdated`);
+  }
+  if (replay.steps.length < SHADOW_SETTLING_GAMES) flags.push("Still settling");
+
+  return {
+    anchor: { t: anchor.t, rating: anchor.rating },
+    shadow: { start: shadowStart, now: replay.end, change: replay.end - shadowStart },
+    official: { start: officialStart, now: officialNow, change: officialNow - officialStart },
+    replayed: { rated: replay.rated, unrated: replay.unrated },
+    flags,
+  };
+}
+
+// every window, with K measured once from the rated games
+function shadowWindows(records, now) {
+  const K = calibrateK(records)?.K ?? 16;
+  return SHADOW_WINDOWS.map((w) => ({ ...w, K, result: shadowWindow(records, w.days, now, K) }));
+}
+
 // --- controls and cards ---
 
 // every 100 the milestone dropdown offers: above the lower settled start, up to the higher peak
@@ -967,7 +1026,7 @@ if (typeof module !== "undefined") {
     dataStates, recentBreak, pathBreak, raceResult, gainSeries, headlineMilestone, tileMilestones,
     chartSeries, valueAt, leadChanges, defaultZoomEnd, milestoneOptions, volatilityText,
     footerText, RACE_METHODOLOGY, shadowExpected, shadowReplay, calibrateK, placementAnchorIndex,
-    shadowSummary, shadowText, statesText,
+    shadowSummary, shadowText, statesText, SHADOW_WINDOWS, shadowWindow, shadowWindows,
     logLoss, compareSkillEstimates,
     headlineText, tileText, percentile, volatilityFromSessions, volatilityOf, rustCheck,
     projectionOf, projectAt, rivalsOf, climbBreakdown,

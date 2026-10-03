@@ -364,6 +364,34 @@ test("/stats lives in local storage and is revalidated with its etag", async () 
   assert.deepEqual(server.requests.map((r) => r.sentEtag), [null, "s1"]); // second one is a 304
 });
 
+test("/stats tells 'no such player' (404) apart from a failed request", async () => {
+  const storage = fakeStorage();
+  const goneUrl = `${API}/typo/stats`;
+  const downUrl = `${API}/me/stats`;
+  const server = fakeServer({}); // 404 for everything
+  const failing = async (url) => {
+    if (url === downUrl) throw new TypeError("Failed to fetch");
+    return server.fetch(url);
+  };
+  let data = openPopup(storage, { ...server, fetch: failing });
+  globalThis.fetch = failing;
+  assert.equal(await data.fetchStats("typo"), null);
+  assert.equal(await data.fetchStats("me"), null);
+  assert.equal(await data.playerMissing("typo"), true);
+  assert.equal(await data.playerMissing("me"), false); // network failure: not "missing"
+  assert.equal(await data.fetchStats("typo", { cacheOnly: true }), null);
+  data.restoreLog();
+
+  // the account shows up later (typo fixed on chess.com's side, or a new account)
+  age(storage, 10000);
+  const later = fakeServer({ [goneUrl]: { body: { chess_bullet: { last: { rating: 900 } } }, etag: "t1" } });
+  data = openPopup(storage, later);
+  assert.equal((await data.fetchStats("typo")).stats.chess_bullet.last.rating, 900);
+  assert.equal(await data.playerMissing("typo"), false);
+  assert.equal(later.requests[0].sentEtag, null); // a not-found entry has no etag to send
+  data.restoreLog();
+});
+
 test("one sync never asks for the same current month twice (5s freshness)", async () => {
   const server = fakeServer(twoPlayerRoutes());
   const data = openPopup(fakeStorage(), server);

@@ -668,3 +668,71 @@ test("climb: a step that ends before it starts (started between two milestones) 
   assert.ok(steps.every((st) => st.days >= 0));
   assert.ok(!steps.some((st) => st.from === 1000));
 });
+
+// --- shadow rating: time windows ---
+
+// NOW is Dec 31 2024 noon. a window of `days` starts `days` before it
+const daysAgo = (d, minutes = 0) => NOW / 1000 - d * 86400 + minutes * 60;
+const unratedAt = (t, oppPre, score) => rec(t, 1500, { rated: false, oppPre, oppRating: oppPre, myPre: 1500, score, opponent: `o${nextId}` });
+const ratedAt = (t, rating) => rec(t, rating, { oppPre: rating, myPre: rating, score: 0.5, opponent: `r${nextId}` });
+
+test("shadow window: rated game 10 days before the window, then only unrated -> replay starts right after it", () => {
+  const anchor = ratedAt(daysAgo(40), 2000);
+  const games = [anchor, ...Array.from({ length: 20 }, (_, i) => unratedAt(daysAgo(39 - i), 2000, 1))];
+  const w = r.shadowWindow(games, 30, NOW, 16);
+  assert.equal(w.anchor.t, anchor.t);
+  assert.equal(w.anchor.rating, 2000);
+  assert.deepEqual(w.replayed, { rated: 0, unrated: 20 }); // every game after the anchor, warm-up included
+  // 10 warm-up games (days 39..30 ago) already moved the shadow before the window opened
+  assert.ok(w.shadow.start > 2000);
+  assert.ok(w.shadow.now > w.shadow.start);
+  // nothing rated since: official didn't move
+  assert.deepEqual(w.official, { start: 2000, now: 2000, change: 0 });
+});
+
+test("shadow window: starting 100 off, K = 16, 100 games at 50% vs equal opponents -> within 15", () => {
+  // true level 1500: 100 games against 1500s, half won. the anchor says 1600
+  const games = [ratedAt(daysAgo(31), 1600)];
+  for (let i = 0; i < 100; i++) games.push(unratedAt(daysAgo(29, i), 1500, i % 2));
+  const w = r.shadowWindow(games, 30, NOW, 16);
+  assert.ok(Math.abs(w.shadow.now - 1500) < 15, String(w.shadow.now));
+  assert.deepEqual(w.flags, []); // 100 replayed: settled, and the anchor is 1 day before the window
+});
+
+test("shadow window: an anchor 90 days before the window start is flagged as outdated", () => {
+  const games = [ratedAt(daysAgo(120), 2000), unratedAt(daysAgo(10), 2000, 1)];
+  const w = r.shadowWindow(games, 30, NOW, 16);
+  assert.ok(w.flags.includes("Starting rating is from 3 months earlier and may be outdated"));
+  assert.ok(w.flags.includes("Still settling")); // 1 game replayed
+});
+
+test("shadow window: no rated game before the window -> anchors on the first rated game inside it", () => {
+  const games = [unratedAt(daysAgo(20), 1500, 1), ratedAt(daysAgo(15), 1800), unratedAt(daysAgo(5), 1800, 1), ratedAt(daysAgo(2), 1810)];
+  const w = r.shadowWindow(games, 30, NOW, 16);
+  assert.equal(w.anchor.rating, 1800);
+  assert.equal(w.shadow.start, 1800); // the window opens at the anchor
+  assert.deepEqual(w.official, { start: 1800, now: 1810, change: 10 });
+  assert.deepEqual(w.replayed, { rated: 1, unrated: 1 }); // the unrated game before the anchor isn't
+  assert.ok(!w.flags.some((f) => f.startsWith("Starting rating")));
+});
+
+test("shadow window: no games in it, no rated games at all, all time anchors on rated game 60", () => {
+  const old = [ratedAt(daysAgo(200), 2000)];
+  assert.deepEqual(r.shadowWindow(old, 30, NOW, 16), { empty: true });
+  assert.deepEqual(r.shadowWindow([unratedAt(daysAgo(5), 1500, 1)], 30, NOW, 16), { noRated: true });
+
+  const career = Array.from({ length: 70 }, (_, i) => ratedAt(daysAgo(300 - i), 1000 + i * 10));
+  const all = r.shadowWindow(career, null, NOW, 16);
+  assert.equal(all.anchor.rating, 1590); // rated game 60
+  assert.deepEqual(all.replayed, { rated: 10, unrated: 0 });
+  assert.equal(all.official.start, 1590);
+  // fewer than 60 rated games: the first one
+  assert.equal(r.shadowWindow(career.slice(0, 5), null, NOW, 16).anchor.rating, 1000);
+});
+
+test("shadow windows: 30 days, 90 days, 1 year, all time, one K for all", () => {
+  const ws = r.shadowWindows([ratedAt(daysAgo(10), 2000), unratedAt(daysAgo(5), 2000, 1)], NOW);
+  assert.deepEqual(ws.map((w) => w.label), ["30 days", "90 days", "1 year", "All time"]);
+  assert.deepEqual(ws.map((w) => w.days), [30, 90, 365, null]);
+  assert.ok(ws.every((w) => w.K === 16)); // too few rated games to measure: 16
+});

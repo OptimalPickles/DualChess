@@ -1,0 +1,127 @@
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Performance</title>
+        <link rel="stylesheet" href="compare.css" />
+    </head>
+    <body>
+        <h1>Full comparison</h1>
+
+        <!-- who and which time class. also where the fair play lock message goes -->
+        <p id="status">Loading…</p>
+
+        <!-- saved in chrome.storage.local, shared with the popup -->
+        <div id="controls" hidden>
+            <select id="ctl-range" title="Range">
+                <option value="today">today</option>
+                <option value="games:10">last 10 games</option>
+                <option value="games:20">last 20 games</option>
+                <option value="games:50">last 50 games</option>
+                <option value="days:7">last 7 days</option>
+                <option value="days:30">last 30 days</option>
+            </select>
+            <select id="ctl-rated" title="Rated">
+                <option value="all">rated + unrated</option>
+                <option value="rated">rated</option>
+                <option value="unrated">unrated</option>
+            </select>
+        </div>
+
+        <!-- removed entirely while a game is in progress, see checkLock() -->
+        <main id="content" hidden>
+            <section id="players-section">
+                <h2>Players</h2>
+                <div class="players">
+                    <div id="player-0" class="player-card"></div>
+                    <div id="player-1" class="player-card"></div>
+                </div>
+                <!-- when we last confirmed these numbers with chess.com -->
+                <p id="data-as-of" class="note"></p>
+                <h3>Data states</h3>
+                <!-- needs the full history -->
+                <div id="states"><p class="note">Needs the full history.</p></div>
+            </section>
+
+            <section id="prediction-section">
+                <h2>Prediction and matchup</h2>
+                <div id="prediction"></div>
+                <!-- rivalries only (30+ games): the matchup rating and the field ratings it's built on -->
+                <div id="matchup"></div>
+            </section>
+
+            <section id="h2h-section">
+                <h2>Head-to-head</h2>
+                <div id="h2h"></div>
+            </section>
+
+            <!-- loading the full history: progress, and the question before a big download -->
+            <div id="history">
+                <p id="history-status" class="note"></p>
+                <div id="history-prompt" hidden>
+                    <p id="history-prompt-text"></p>
+                    <button type="button" id="history-load">Load it</button>
+                    <button type="button" id="history-decline">Not now</button>
+                </div>
+            </div>
+
+            <section id="race-section">
+                <h2>Race</h2>
+                <div id="race-summary"></div>
+                <!-- the chart's settings, for this page only -->
+                <div id="race-controls" hidden>
+                    <select id="race-x" title="X-axis">
+                        <option value="days">Days</option>
+                        <option value="games">Games</option>
+                    </select>
+                    <select id="race-view" title="View">
+                        <option value="rating">Rating</option>
+                        <option value="gain">Rating gained since start</option>
+                    </select>
+                    <label><input type="checkbox" id="race-smoothed" checked /> Smoothed</label>
+                    <select id="race-milestone" title="Milestone"></select>
+                    <select id="race-counted" title="Games counted">
+                        <option value="both">Rated + unrated games</option>
+                        <option value="rated">Rated games</option>
+                        <option value="unrated">Unrated games</option>
+                    </select>
+                </div>
+                <!-- the race for the milestone picked above -->
+                <div id="race-selected"></div>
+                <div id="race-chart"></div>
+                <button type="button" id="race-full" class="link" hidden>Show full history</button>
+                <div id="race-cards"></div>
+                <!-- so a screenshot says what it is without any other context -->
+                <footer id="race-footer" hidden>
+                    <span id="race-footer-text"></span> ·
+                    <button type="button" id="race-methodology" class="link inline">How this is calculated</button>
+                </footer>
+            </section>
+
+            <section id="climb-section">
+                <h2>Climb breakdown</h2>
+                <div id="climb"><p class="note">Needs the full history.</p></div>
+            </section>
+
+            <section id="shadow-section">
+                <h2>Shadow rating</h2>
+                <div id="shadow"><p class="note">Needs the full history.</p></div>
+            </section>
+
+            <section id="methodology-section">
+                <h2>How this is calculated</h2>
+                <div id="methodology"></div>
+            </section>
+        </main>
+
+        <!-- the same scripts as the popup, plus race.js. echarts isn't here: it's loaded
+             when there's a race to draw -->
+        <script src="../scripts/performance.js"></script>
+        <script src="../scripts/fairplay.js"></script>
+        <script src="../scripts/race.js"></script>
+        <script src="../scripts/rivalry.js"></script>
+        <script src="../scripts/data.js"></script>
+        <script src="../scripts/details.js"></script>
+        <script src="../scripts/tabs.js"></script>
+        <script src="compare.js"></script>
+    </body>
+</html>

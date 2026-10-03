@@ -4,127 +4,87 @@
         <link rel="stylesheet" href="popup.css" />
     </head>
     <body>
-        <h1>Performance</h1>
+        <!-- loading, "open a chess.com page", errors -->
+        <p id="status" class="status">Loading…</p>
 
-        <!-- shared by every view. also where the fair play lock message goes -->
-        <p id="status">Loading…</p>
+        <!-- only shown until we know your username -->
+        <div id="who-are-you" hidden>
+            <p id="who-are-you-text">Which of these is you?</p>
+            <div id="who-are-you-candidates"></div>
+            <input id="who-are-you-input" type="text" placeholder="or type your chess.com username" />
+            <button id="who-are-you-save" type="button">Save</button>
+        </div>
 
-        <!-- one button per view. methodology isn't here, it opens from its link -->
-        <nav id="views">
-            <button type="button" data-view="overview">Overview</button>
-            <button type="button" data-view="race">Race</button>
-        </nav>
+        <div id="main" hidden>
+            <!-- shared by both views -->
+            <header class="header">
+                <div class="header-row">
+                    <div id="views" class="seg" role="group" aria-label="View">
+                        <button type="button" data-view="me" aria-pressed="false">Me</button>
+                        <button type="button" data-view="compare" aria-pressed="false">Compare</button>
+                    </div>
+                    <span id="updated" class="updated"></span>
+                </div>
+                <!-- saved in chrome.storage.local -->
+                <label class="tc"><span class="sr">Time control</span>
+                    <select id="ctl-time">
+                        <option value="auto">auto</option>
+                        <option value="bullet">Bullet</option>
+                        <option value="blitz">Blitz</option>
+                        <option value="rapid">Rapid</option>
+                        <option value="daily">Daily</option>
+                    </select>
+                </label>
+            </header>
 
-        <section id="view-overview">
-            <!-- only shown until we know your username -->
-            <div id="who-are-you" hidden>
-                <p id="who-are-you-text">Which of these is you?</p>
-                <div id="who-are-you-candidates"></div>
-                <input id="who-are-you-input" type="text" placeholder="or type your chess.com username" />
-                <button id="who-are-you-save" type="button">Save</button>
-            </div>
+            <main class="body">
+                <p id="no-opponent" class="note" hidden>No opponent on this page</p>
 
-            <!-- saved in chrome.storage.local -->
-            <div id="controls" hidden>
-                <select id="ctl-time">
-                    <option value="auto">auto</option>
-                    <option value="bullet">bullet</option>
-                    <option value="blitz">blitz</option>
-                    <option value="rapid">rapid</option>
-                    <option value="daily">daily</option>
-                </select>
-                <select id="ctl-range">
-                    <option value="today">today</option>
-                    <option value="games:10">last 10 games</option>
-                    <option value="games:20">last 20 games</option>
-                    <option value="games:50">last 50 games</option>
-                    <option value="days:7">last 7 days</option>
-                    <option value="days:30">last 30 days</option>
-                </select>
-                <select id="ctl-rated">
-                    <option value="all">rated + unrated</option>
-                    <option value="rated">rated</option>
-                    <option value="unrated">unrated</option>
-                </select>
-            </div>
+                <!-- fair play: a game is in progress, so this is all the body shows -->
+                <div id="lock" class="lock" role="status" hidden>
+                    <span class="pulse" aria-hidden="true"></span>
+                    <p><strong>Game in progress.</strong> Stats will appear when it ends.</p>
+                </div>
 
-            <div id="results">
-                <div id="primary-info" class="player-card"></div>
-                <div id="opponent-info" class="player-card"></div>
-                <!-- when we last confirmed these numbers with chess.com -->
-                <p id="data-as-of"></p>
-                <div id="prediction"></div>
-                <!-- rivalries only (30+ games): the matchup rating and the field ratings it's built on -->
-                <div id="matchup"></div>
-                <div id="h2h"></div>
-            </div>
+                <div id="view-me" class="view" hidden>
+                    <section id="me-level" class="player player--solo"></section>
+                    <ul id="me-lines" class="lines"></ul>
+                    <button type="button" id="open-stats" class="link">Full stats ↗</button>
+                </div>
 
-            <!-- the race in two lines, from cache only. the full race loads when it's opened -->
-            <div id="overview-race" hidden>
-                <div id="overview-race-summary"></div>
-                <button type="button" id="open-race">Open race</button>
-            </div>
+                <div id="view-compare" class="view" hidden>
+                    <section id="players" class="players">
+                        <div id="col-0" class="player"></div>
+                        <div id="col-1" class="player player--opp"></div>
+                    </section>
+                    <section id="prediction" class="prediction">
+                        <p id="prediction-text"></p>
+                        <div class="bar" aria-hidden="true"><span id="bar-you" class="you"></span><span class="opp"></span></div>
+                    </section>
+                    <ul id="compare-lines" class="lines"></ul>
+                    <details id="more" class="more">
+                        <summary>More details</summary>
+                        <table id="more-table"></table>
+                        <div id="more-extra" class="more-extra"></div>
+                    </details>
+                    <button type="button" id="open-compare" class="link">Full comparison ↗</button>
+                </div>
+            </main>
 
-            <button id="restart-tally" type="button" hidden>Restart session tally</button>
-            <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
-        </section>
-
-        <section id="view-race" hidden>
-            <p id="race-status"></p>
-            <!-- asks before a big download, see openRace() -->
-            <div id="race-prompt" hidden>
-                <p id="race-prompt-text"></p>
-                <button type="button" id="race-load">Load it</button>
-                <button type="button" id="race-decline">Not now</button>
-            </div>
-            <div id="race-summary"></div>
-            <!-- the chart's settings, for this popup only -->
-            <div id="race-controls" hidden>
-                <select id="race-x" title="X-axis">
-                    <option value="days">Days</option>
-                    <option value="games">Games</option>
-                </select>
-                <select id="race-view" title="View">
-                    <option value="rating">Rating</option>
-                    <option value="gain">Rating gained since start</option>
-                </select>
-                <label><input type="checkbox" id="race-smoothed" checked /> Smoothed</label>
-                <select id="race-milestone" title="Milestone"></select>
-                <select id="race-counted" title="Games counted">
-                    <option value="both">Rated + unrated games</option>
-                    <option value="rated">Rated games</option>
-                    <option value="unrated">Unrated games</option>
-                </select>
-            </div>
-            <!-- the race for the milestone picked above -->
-            <div id="race-selected"></div>
-            <div id="race-chart"></div>
-            <button type="button" id="race-full" class="link" hidden>Show full history</button>
-            <div id="race-cards"></div>
-            <!-- each player's climb, 100 points at a time (folded until opened) -->
-            <div id="race-climb"></div>
-            <!-- so a screenshot says what it is without any other context -->
-            <footer id="race-footer" hidden>
-                <span id="race-footer-text"></span> ·
-                <button type="button" id="race-methodology" class="link inline">How this is calculated</button>
+            <footer class="foot">
+                <button id="change-account" type="button">Not you? Change tracked account</button>
             </footer>
-        </section>
+        </div>
 
-        <!-- filled from METHODOLOGY in performance.js -->
-        <section id="view-methodology" hidden>
-            <h2>How this is calculated</h2>
-            <div id="methodology"></div>
-        </section>
-
-        <button type="button" id="open-methodology" class="link">How this is calculated</button>
-
-        <!-- performance.js, fairplay.js, race.js, rivalry.js, data.js, then popup.js. each uses the ones
-             before it. echarts isn't here: it's loaded the first time the race view opens -->
+        <!-- performance.js, fairplay.js, race.js, rivalry.js, data.js, details.js, tabs.js, then
+             popup.js. each uses the ones before it -->
         <script src="../scripts/performance.js"></script>
         <script src="../scripts/fairplay.js"></script>
         <script src="../scripts/race.js"></script>
         <script src="../scripts/rivalry.js"></script>
         <script src="../scripts/data.js"></script>
+        <script src="../scripts/details.js"></script>
+        <script src="../scripts/tabs.js"></script>
         <script src="popup.js"></script>
     </body>
 </html>
