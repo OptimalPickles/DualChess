@@ -214,6 +214,8 @@ test("B at day 45 rated 1380, A was 1150 at day 45 and reached 1500 on day 140 -
   assert.deepEqual([result.reachedBy, result.chasing, result.day, result.aheadBy], ["a", "b", 45, 230]);
   assert.equal(r.headlineText(result, A, B), "At day 45, b is 230 points ahead of a's pace to 1500");
   assert.deepEqual(r.tileText(result), ["Race to 1500 · in progress · b +230 ahead of pace"]);
+  const behind = { ...result, aheadBy: -330 };
+  assert.deepEqual(r.tileText(behind), ["Race to 1500 · in progress · b 330 behind pace"]);
 });
 
 // test 6, the race half
@@ -374,10 +376,18 @@ test("climb: under 1000 unrated games, start and end are the two halves, never t
   assert.equal(step.per1000, null); // 310 games: too few to turn into a per-1000 rate
 });
 
-test("climb: rivals are left out by default", () => {
+test("climb: every opponent counts by default, rivals included", () => {
   const games = climb(600, { rival: 100 });
   const j = r.journeyOf(games, NOW);
-  assert.equal(r.climbBreakdown(games, j).steps.find((s) => s.from === 1900).unratedCount, 500);
+  assert.equal(r.climbBreakdown(games, j).steps.find((s) => s.from === 1900).unratedCount, 600);
+});
+
+test("shadow summary: every opponent counts by default", () => {
+  const games = syntheticElo(16, 100);
+  const last = games.at(-1);
+  for (let i = 0; i < 40; i++) games.push(rec(last.t + 60 * (i + 1), last.rating, { rated: false, oppPre: 1500, oppRating: 1500, myPre: last.rating, score: 1, opponent: "rival" }));
+  const sh = r.shadowSummary(games);
+  assert.deepEqual([sh.unrated, sh.skipped, sh.leaveOutRivals], [40, 0, false]);
 });
 
 test("climb: agreement uses both numbers' errors combined", () => {
@@ -422,4 +432,239 @@ test("journey folded month by month = folded all at once", () => {
   const { rated, ...whole } = r.journeyOf(games, now);
   const { rated: _, ...folded } = r.finishJourney(saved, now);
   assert.deepEqual(folded, whole);
+});
+
+// --- phase 5: summary helpers ---
+
+test("headline text with 'You': you are, your pace, sooner than you", () => {
+  const A = { name: "a", journey: journey([...flat(0, 139, 1150, 2), [140, 1500]]) };
+  const now = new Date(2024, 0, 1 + 45, 20).getTime();
+  const B = { name: "b", journey: journey(flat(0, 45, 1380, 2), now) };
+  const result = r.raceResult(1500, A, B);
+  assert.equal(r.headlineText(result, A, B, { b: "You" }), "At day 45, you are 230 points ahead of a's pace to 1500");
+  assert.equal(r.headlineText(result, A, B, { a: "You" }), "At day 45, b is 230 points ahead of your pace to 1500");
+  const F = { name: "f", journey: journey([...flat(0, 409, 1500), [410, 2000]]) };
+  const S = { name: "s", journey: journey([...flat(0, 979, 1500), [980, 2000]]) };
+  assert.equal(r.headlineText(r.raceResult(2000, F, S), F, S, { s: "You" }), "f reached 2000 in 410 days, 570 days sooner than you");
+});
+
+test("tile milestones: round 500s from the lower settled start to the higher peak, top 4", () => {
+  const j = (settledStart, peak) => ({ journey: { settledStart, peak } });
+  assert.deepEqual(r.tileMilestones(j(823, 2100), j(1695, 1700)), [1000, 1500, 2000]);
+  assert.deepEqual(r.tileMilestones(j(400, 3100), j(900, 1200)), [1500, 2000, 2500, 3000]);
+  assert.deepEqual(r.tileMilestones(j(null, 1210), j(1500, 1900)), [2000]); // still placing
+});
+
+// --- phase 5: chart data ---
+
+test("chartSeries: days or games on x, smoothed or raw, and the gain view", () => {
+  const games = [...flat(0, 59, 1500).map(([d, x], i) => rec(atDay(d, i), x)), rec(atDay(60), 1600, { rated: false }), rec(atDay(61), 1700)];
+  const j = r.journeyOf(games, NOW);
+  const days = r.chartSeries(j);
+  assert.deepEqual(days.at(-1).x, 61);
+  const byGames = r.chartSeries(j, { x: "games", counted: "both" });
+  assert.equal(byGames.at(-1).x, 62); // 61 rated + 1 unrated
+  assert.equal(r.chartSeries(j, { x: "games", counted: "rated" }).at(-1).x, 61);
+  assert.equal(r.chartSeries(j, { smoothed: false }).at(-1).y, 1700);
+  assert.equal(r.chartSeries(j).at(-1).y, 1500); // the median of 50 is still 1500
+  const gain = r.chartSeries(j, { view: "gain" });
+  assert.deepEqual([gain[0].x, gain[0].y], [0, 0]); // starts at rated game 60, at zero gained
+  assert.deepEqual(r.chartSeries(journey(flat(0, 30, 1500)), { view: "gain" }), []); // still placing
+});
+
+test("lead changes: only when the new leader is 25+ points clear", () => {
+  const line = (pairs) => pairs.map(([x, y]) => ({ x, y }));
+  const a = line([[0, 1500], [10, 1500], [20, 1500], [30, 1500]]);
+  const b = line([[0, 1400], [10, 1490], [20, 1530], [30, 1510]]);
+  // day 10: a only 10 clear (no change). day 20: b 30 clear, takes the lead. day 30: b 10 clear, still b
+  assert.deepEqual(r.leadChanges(a, b), [{ x: 20, leader: "b", y: 1530 }]);
+});
+
+test("default zoom: just past the later crossing of the highest milestone either reached", () => {
+  const A = { name: "a", journey: journey([...flat(0, 99, 1500), [410, 2000], [1500, 2050]]) };
+  const B = { name: "b", journey: journey([...flat(0, 99, 1500), [980, 2000]]) };
+  assert.equal(r.defaultZoomEnd(A, B), Math.ceil(980 * 1.08) + 1);
+  const C = { name: "c", journey: journey(flat(0, 99, 1500)) };
+  assert.equal(r.defaultZoomEnd(C, C), null); // nothing crossed: show everything
+});
+
+// --- phase 5: controls and cards ---
+
+test("milestone dropdown: every 100 above the lower settled start, up to the higher peak", () => {
+  const j = (settledStart, peak) => ({ journey: { settledStart, peak } });
+  assert.deepEqual(r.milestoneOptions(j(823, 1250), j(1695, 1100)), [900, 1000, 1100, 1200]);
+  assert.deepEqual(r.milestoneOptions(j(null, 1250), j(null, 900)), [200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200]);
+});
+
+test("volatility card text, with a rust line only when returning", () => {
+  const vol = r.volatilityFromSessions([2300, 2050, 2150, 1900, 2250, 2000].map((perf, i) => ({ perf, error: 110, games: 12, date: atDay(i) })));
+  const card = r.volatilityText("legendary9000", vol, null);
+  assert.equal(card[0], "legendary9000 · Normal (106)");
+  assert.match(card[1], /^Form range \d+–\d+ across 6 sessions$/);
+  assert.equal(card[2], "Best session 2300 (12 games, Jan 1, 2024) · worst 1900 (12 games, Jan 4, 2024)");
+  assert.equal(card.length, 3);
+  const rust = { breakDays: 75, before: { perf: 1950, games: 50 }, after: { perf: 1820, games: 20 }, change: -130 };
+  assert.equal(r.volatilityText("x", vol, rust)[3], "Back from a 75-day break: 1820 in the first 20 games vs 1950 in the 50 before (-130)");
+  assert.deepEqual(r.volatilityText("x", { label: "Not enough sessions" }, null)[0], "x · Not enough sessions");
+});
+
+test("footer: time class, rated games, as of a date", () => {
+  assert.equal(r.footerText("bullet", atDay(274)), "Bullet · rated games · as of Oct 1, 2024");
+});
+
+// --- shadow rating: replay ---
+
+// an anchor game at `start`, then games vs these [oppPre, score] pairs (unrated, like mine)
+const replayRecords = (start, games, opts = {}) => [
+  rec(atDay(0), start, { oppPre: 1500, myPre: start - 8, opponent: "anchor" }),
+  ...games.map(([oppPre, score, opponent = `o${nextId}`], i) =>
+    rec(atDay(1, i), start, { rated: false, oppPre, oppRating: oppPre, score, opponent, ...opts })),
+];
+
+test("shadow: a win vs an equal opponent at K = 16 -> +8", () => {
+  const out = r.shadowReplay(replayRecords(2000, [[2000, 1]]), 16);
+  assert.equal(out.start, 2000);
+  assert.ok(Math.abs(out.end - 2008) < 1e-9);
+  assert.deepEqual([out.steps[0].before, out.steps[0].after], [2000, 2008]);
+});
+
+test("shadow: at 2100 vs 2050, K = 16 -> a win about +6.9, a loss about -9.1", () => {
+  const win = r.shadowReplay(replayRecords(2100, [[2050, 1]]), 16);
+  const loss = r.shadowReplay(replayRecords(2100, [[2050, 0]]), 16);
+  assert.ok(Math.abs(win.end - 2100 - 6.86) < 0.01, String(win.end - 2100));
+  assert.ok(Math.abs(loss.end - 2100 + 9.14) < 0.01, String(loss.end - 2100));
+  const draw = r.shadowReplay(replayRecords(2100, [[2050, 0.5]]), 16);
+  assert.ok(draw.end < 2100); // a draw as the favourite still costs a little
+});
+
+test("shadow: starts after the anchor, counts rated and unrated, leaveOutRivals skips 30+ game opponents", () => {
+  const games = [
+    ...Array.from({ length: 30 }, () => [2000, 1, "rival"]),
+    [2000, 0, "someone"],
+  ];
+  const records = replayRecords(2000, games);
+  records.push(rec(atDay(2), 2010, { oppPre: 2000, oppRating: 1992, score: 1, opponent: "ratedfoe" })); // one rated game
+  const all = r.shadowReplay(records, 16);
+  assert.deepEqual([all.unrated, all.rated, all.skipped], [31, 1, 0]);
+  const noRivals = r.shadowReplay(records, 16, { leaveOutRivals: true });
+  assert.deepEqual([noRivals.unrated, noRivals.rated, noRivals.skipped], [1, 1, 30]);
+  // anchorIndex: everything before it, and the anchor itself, isn't replayed
+  assert.equal(r.shadowReplay(records, 16, { anchorIndex: 31 }).steps.length, 1);
+});
+
+// --- shadow rating: calibrate K ---
+
+// a small repeatable random number generator, so the synthetic games are the same every run
+function seeded(seed) {
+  return () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+}
+
+// rated games whose recorded ratings really were made by elo with this K
+function syntheticElo(K, n = 400) {
+  const rand = seeded(7);
+  let rating = 1500;
+  const games = [];
+  for (let i = 0; i < n; i++) {
+    const oppPre = Math.round(rating + (rand() - 0.5) * 300);
+    const expected = 1 / (1 + Math.pow(10, (oppPre - rating) / 400));
+    const score = rand() < expected ? 1 : 0;
+    const myPre = rating;
+    rating += K * (score - expected);
+    games.push(rec(atDay(i), rating, { oppPre, score, rated: true, myPre }));
+  }
+  return games;
+}
+
+test("calibrateK: games made with K = 12 -> 12, and its error is ~0", () => {
+  const cal = r.calibrateK(syntheticElo(12));
+  assert.equal(cal.K, 12);
+  assert.ok(cal.meanError < 1e-6, String(cal.meanError));
+  assert.equal(cal.results.length, 9); // K = 8, 10, ..., 24
+  assert.equal(r.calibrateK(syntheticElo(20)).K, 20);
+});
+
+test("calibrateK: unrated games don't count, and fewer than 61 rated games -> null", () => {
+  // 50 unrated games with absurd ratings: if they counted, K = 12 would no longer fit
+  const games = syntheticElo(12);
+  const withUnrated = [...games, ...games.slice(0, 50).map((g) => ({ ...g, id: g.id + 100000, rated: false, rating: 3000 }))];
+  assert.equal(r.calibrateK(withUnrated).K, 12);
+  assert.equal(r.calibrateK(syntheticElo(12, 60)), null);
+});
+
+// --- shadow rating: does it beat the official rating? ---
+
+test("log loss: 0 when certain and right, ln 2 for a coin flip, draws count as 0.5", () => {
+  assert.ok(r.logLoss(1, 0.999999) < 1e-5);
+  assert.ok(Math.abs(r.logLoss(1, 0.5) - Math.LN2) < 1e-12);
+  assert.ok(Math.abs(r.logLoss(0.5, 0.5) - Math.LN2) < 1e-12);
+  assert.ok(r.logLoss(0, 0.9) > r.logLoss(0, 0.1));
+});
+
+test("no unrated games and elo-made ratings -> shadow and official predict identically", () => {
+  const cmp = r.compareSkillEstimates(syntheticElo(16), 16);
+  assert.equal(cmp.games, 400 - 60);
+  assert.ok(Math.abs(cmp.shadow - cmp.official) < 1e-9);
+});
+
+test("got better in unrated games, rating didn't move -> the shadow predicts rated games better", () => {
+  const games = [];
+  let t = 0;
+  const add = (opts) => games.push(rec(atDay(0, t++), opts.rating, { oppPre: 1500, oppRating: 1500, myPre: opts.rating, ...opts }));
+  // 60 rated games at 50% vs 1500: official 1500
+  for (let i = 0; i < 60; i++) add({ rating: 1500, score: i % 2 });
+  // 400 unrated games at 75% vs 1500: playing like ~1700 now, but official is still 1500
+  for (let i = 0; i < 400; i++) add({ rating: 1500, rated: false, score: i % 4 ? 1 : 0 });
+  // 40 rated games at 75% vs 1500 (official still 1500 going into each, to keep it simple)
+  for (let i = 0; i < 40; i++) add({ rating: 1500, score: i % 4 ? 1 : 0 });
+  const cmp = r.compareSkillEstimates(games, 16);
+  assert.equal(cmp.games, 40);
+  assert.equal(cmp.unratedSeen, 400);
+  assert.ok(cmp.shadow < cmp.official, `${cmp.shadow} vs ${cmp.official}`);
+});
+
+// --- showing what's computed: shadow card, data states ---
+
+test("shadow summary: anchors on the last rated game and replays the unrated games after it", () => {
+  // 100 elo-made rated games, then 50 unrated wins vs equal opponents
+  const games = syntheticElo(16, 100);
+  const last = games.at(-1);
+  for (let i = 0; i < 50; i++) games.push(rec(last.t + 60 * (i + 1), last.rating, { rated: false, oppPre: Math.round(last.rating), oppRating: Math.round(last.rating), myPre: last.rating, score: 1, opponent: `u${i}` }));
+  const sh = r.shadowSummary(games);
+  assert.equal(sh.start, last.rating);
+  assert.equal(sh.unrated, 50);
+  assert.equal(sh.K, 16); // measured from the rated games
+  assert.ok(sh.change > 100); // 50 straight wins
+  const text = r.shadowText(sh);
+  assert.equal(text[0], "Your shadow rating");
+  assert.match(text[1], /^Since your last rated game \(.+, \d+(\.\d+)?\): \d+ \(\+\d+\) across 50 unrated games$/);
+  assert.equal(text[2], "Estimated as if your unrated games were rated.");
+  assert.match(text[3], /^K = 16, measured from your rated games/);
+});
+
+test("shadow text: no rated game, no unrated games since", () => {
+  assert.deepEqual(r.shadowText(null), ["Your shadow rating", "No rated games to start from"]);
+  const sh = r.shadowSummary(syntheticElo(16, 100));
+  assert.match(r.shadowText(sh)[1], /^No unrated games since your last rated game/);
+});
+
+test("data states as words", () => {
+  const now = new Date(2024, 11, 31, 12).getTime();
+  const j = { ratedCount: 23, lastT: now / 1000 - 125 * 86400, breaks: [] };
+  assert.equal(r.statesText(["placing", "inactive", "sparse"], j, now), "Still placing (23 of 60 rated games) · Last played 4 months ago · Few sessions in the last year");
+  assert.equal(r.statesText(["inactive"], { ...j, lastT: now / 1000 - 40 * 86400 }, now), "Last played 1 month ago");
+  const back = { ratedCount: 500, lastT: now / 1000, breaks: [{ days: 75, toT: now / 1000 - 10 * 86400, fromT: 0 }] };
+  assert.equal(r.statesText(["returning"], back, now), "Back from a 75-day break");
+  assert.equal(r.statesText([], j, now), "");
+});
+
+test("climb: a step that ends before it starts (started between two milestones) is left out", () => {
+  // first rated game 1050: 1100 is reached from below at game 61, but 1000 only after
+  // dropping to 950 later and coming back (game 63)
+  const ratings = [1050, ...Array(59).fill(1050), 1110, 950, 1010, 1090, 1120];
+  const games = daily(ratings).map((g) => ({ ...g, myPre: g.rating, oppPre: 1050 }));
+  const j = r.journeyOf(games, NOW);
+  assert.ok(j.milestones[1100].reached.date < j.milestones[1000].reached.date);
+  const { steps } = r.climbBreakdown(games, j);
+  assert.ok(steps.every((st) => st.days >= 0));
+  assert.ok(!steps.some((st) => st.from === 1000));
 });

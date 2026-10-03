@@ -624,6 +624,49 @@ async function fetchPlayerHistory(username, timeClass, onProgress = () => {}, { 
   return { games, missingMonths };
 }
 
+// one time class's games since sinceT, with pre-game numbers, from storage only (the race
+// view has loaded every month by then). for volatility and the rust check. null if a month
+// in that stretch was never loaded
+async function recentRecords(username, timeClass, sinceT) {
+  const name = username.toLowerCase();
+  const months = await fetchArchives(name, { cacheOnly: true });
+  if (!months) return null;
+  const fromMonth = utcMonth(sinceT * 1000);
+  const wanted = months.filter((m) => m >= fromMonth);
+  const byMonth = {};
+  for (const m of wanted) {
+    const games = await fetchMonth(name, m, { cacheOnly: true });
+    if (games === undefined) return null;
+    if (games) byMonth[m] = games;
+  }
+  const annotated = await withPreGame(name, months, byMonth);
+  return Object.values(annotated)
+    .flatMap((m) => m.records)
+    .filter((g) => g.timeClass === timeClass && g.t >= sinceT)
+    .sort((x, y) => x.t - y.t || x.id - y.id);
+}
+
+// how big loading a player's full history would be, before loading any of it.
+// chess.com sends ~4 KB per game (mostly the move list), measured on real months.
+// games per month come from the months already stored (overview keeps the newest 6),
+// so this makes no month requests: just the archives list and storage reads
+const DOWNLOAD_BYTES_PER_GAME = 4000;
+
+async function estimateHistory(username) {
+  const name = username.toLowerCase();
+  const months = await fetchArchives(name);
+  if (!months) return null;
+  const metas = await chrome.storage.local.get(months.map((m) => `monthMeta:${name}:${m}`));
+  const missing = months.filter((m) => !metas[`monthMeta:${name}:${m}`]);
+  const stored = months.filter((m) => !missing.includes(m)).slice(-6);
+  const got = await chrome.storage.local.get(stored.map((m) => `month:${name}:${m}`));
+  const counts = stored.map((m) => got[`month:${name}:${m}`]?.games.length ?? 0);
+  // nothing stored to go by: assume a busy month rather than under-warn
+  const perMonth = counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 500;
+  const games = Math.round(perMonth * missing.length);
+  return { name, months: months.length, missingMonths: missing.length, games, bytes: games * DOWNLOAD_BYTES_PER_GAME };
+}
+
 // a player's journey in one time class (race.js), kept as a derived cache:
 //   derived:journey:<name>:<timeClass> = { rev, through, state }
 // state = the fold as of the end of month `through`, the last finished month folded.
@@ -695,6 +738,7 @@ if (typeof module !== "undefined") {
     revalidateFinishedMonths, getRevision, migrateStorage, fetchStats,
     tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames, withPreGame, dataAsOf,
     playersOfKey, pickPlayersToEvict, markViewed, evictStalePlayers, maintain, fetchJourney,
+    estimateHistory, recentRecords,
     latestHeadToHeadTimeClass, fetchPlayerHistory, findGameInArchive, checkGameLock,
   };
 }

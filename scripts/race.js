@@ -42,7 +42,7 @@ const RACE_CONFIG = {
   climbMinUnrated: 50,
   climbPer1000MinGames: 500, // a per-1000 rate from fewer games is a small, noisy change blown up
   rivalGames: 30,
-  leaveOutRivals: true, // default: how they did against the field, not 26 friends
+  leaveOutRivals: false, // every opponent counts, frequent ones included
 };
 
 // not DAY_MS: data.js has one, and the popup loads every script into the same global scope
@@ -366,6 +366,86 @@ function headlineMilestone(A, B, opts = {}) {
   return null;
 }
 
+// the tiles under the headline: round 500s above the lower settled start, up to the higher
+// peak, at most 4 (the top ones, closest to where they are now). anyone still placing has
+// no settled start yet, so it's one tile at the next 500, which will say "still placing"
+function tileMilestones(A, B) {
+  const step = 500;
+  const settled = [A, B].map((p) => p.journey.settledStart);
+  const high = Math.max(A.journey.peak ?? 0, B.journey.peak ?? 0);
+  if (settled.includes(null)) return [(Math.floor(high / step) + 1) * step];
+  const out = [];
+  for (let m = (Math.floor(Math.min(...settled) / step) + 1) * step; m <= high; m += step) out.push(m);
+  return out.slice(-4);
+}
+
+// --- chart data ---
+// the chart draws the daily points (one per day: that day's last rating and counts), which
+// is what the journey cache keeps. options:
+//   x: "days" | "games", counted: the games toggle, view: "rating" | "gain", smoothed: bool
+
+// one player's line: [{ x, y, p }], p = the daily point for the tooltip.
+// gain view: rating gained since settling, from rated game 60 on
+function chartSeries(journey, { x = "days", counted = RACE_CONFIG.gamesCounted, view = "rating", smoothed = true } = {}) {
+  let points = journey.daily;
+  let x0 = 0;
+  let y0 = 0;
+  if (view === "gain") {
+    if (journey.settledStart == null) return [];
+    const start = points.find((p) => p.ratedGames >= RACE_CONFIG.placementGames);
+    if (!start) return [];
+    points = points.filter((p) => p.day >= start.day);
+    x0 = x === "games" ? gamesBy(start, counted) : start.day;
+    y0 = journey.settledStart;
+  }
+  return points.map((p) => ({
+    x: (x === "games" ? gamesBy(p, counted) : p.day) - x0,
+    y: (smoothed ? p.smoothed : p.rating) - y0,
+    p,
+  }));
+}
+
+// a line's value at x: the last point at or before it (null before it starts)
+function valueAt(series, x) {
+  let found = null;
+  for (const pt of series) {
+    if (pt.x > x) break;
+    found = pt.y;
+  }
+  return found;
+}
+
+// where the lead changes hands. a new leader has to get 25+ points clear, so two lines
+// running side by side don't flicker "takes the lead" every few days
+function leadChanges(a, b, { margin = 25 } = {}) {
+  const xs = [...new Set([...a, ...b].map((pt) => pt.x))].sort((p, q) => p - q);
+  const changes = [];
+  let leader = null;
+  for (const x of xs) {
+    const ya = valueAt(a, x);
+    const yb = valueAt(b, x);
+    if (ya == null || yb == null) continue;
+    const now = ya - yb >= margin ? "a" : yb - ya >= margin ? "b" : null;
+    if (!now || now === leader) continue;
+    if (leader) changes.push({ x, leader: now, y: now === "a" ? ya : yb });
+    leader = now;
+  }
+  return changes;
+}
+
+// the default zoom: just past the later crossing of the highest milestone either reached,
+// so a long career doesn't squash a short one into a corner. null = show everything
+function defaultZoomEnd(A, B, { x = "days", counted = RACE_CONFIG.gamesCounted } = {}) {
+  const ms = Object.keys({ ...A.journey.milestones, ...B.journey.milestones }).map(Number).sort((p, q) => q - p);
+  for (const m of ms) {
+    const crossings = [A, B].map((pl) => pl.journey.milestones[m]?.reached).filter(Boolean);
+    if (!crossings.length) continue;
+    const later = Math.max(...crossings.map((c) => (x === "games" ? gamesBy(c, counted) : c.day)));
+    return Math.ceil(later * 1.08) + 1;
+  }
+  return null;
+}
+
 // --- copy ---
 // labels: name -> what to call them ("You" for the primary user).
 // milestones and ratings are written plain ("2000"), counts get commas ("3,937 games")
@@ -374,6 +454,9 @@ const unit = (n, word) => `${fmtInt(n)} ${word}${Math.round(n) === 1 ? "" : "s"}
 
 function headlineText(result, A, B, labels = {}) {
   const say = (name) => labels[name] ?? name;
+  // "You" mid-sentence is "you", and it takes "are" and "your"
+  const isYou = (name) => labels[name] === "You";
+  const object = (name) => (isYou(name) ? "you" : say(name));
   if (!result) {
     const arrived = [A, B].find((p) => p.journey.arrived);
     return arrived
@@ -381,13 +464,15 @@ function headlineText(result, A, B, labels = {}) {
       : "Compare rating gained since start";
   }
   if (result.status === "finished") {
-    if (!result.winner) return `${say(A.name)} and ${say(B.name)} both reached ${result.m} on day ${fmtInt(result.reached[A.name].day)}`;
+    if (!result.winner) return `${say(A.name)} and ${object(B.name)} both reached ${result.m} on day ${fmtInt(result.reached[A.name].day)}`;
     const days = result.reached[result.winner].day;
-    return `${say(result.winner)} reached ${result.m} in ${unit(days, "day")}, ${unit(result.byDays, "day")} sooner than ${say(result.loser)}`;
+    return `${say(result.winner)} reached ${result.m} in ${unit(days, "day")}, ${unit(result.byDays, "day")} sooner than ${object(result.loser)}`;
   }
   if (result.status === "in progress") {
-    const ahead = result.aheadBy >= 0;
-    return `At day ${fmtInt(result.day)}, ${say(result.chasing)} is ${unit(Math.abs(result.aheadBy ?? 0), "point")} ${ahead ? "ahead of" : "behind"} ${say(result.reachedBy)}'s pace to ${result.m}`;
+    const ahead = (result.aheadBy ?? 0) >= 0;
+    const who = isYou(result.chasing) ? "you are" : `${say(result.chasing)} is`;
+    const whose = isYou(result.reachedBy) ? "your" : `${say(result.reachedBy)}'s`;
+    return `At day ${fmtInt(result.day)}, ${who} ${unit(Math.abs(result.aheadBy ?? 0), "point")} ${ahead ? "ahead of" : "behind"} ${whose} pace to ${result.m}`;
   }
   return "Compare rating gained since start";
 }
@@ -412,9 +497,10 @@ function tileText(result, labels = {}, { counted = RACE_CONFIG.gamesCounted } = 
     case "neither":
       return [`${title} · neither has reached it yet${brk}`];
     case "in progress": {
-      const sign = (result.aheadBy ?? 0) >= 0 ? "+" : "-";
-      const word = (result.aheadBy ?? 0) >= 0 ? "ahead of" : "behind";
-      return [`${title} · in progress · ${say(result.chasing)} ${sign}${fmtInt(Math.abs(result.aheadBy ?? 0))} ${word} pace${brk}`];
+      // "+230 ahead of pace", "330 behind pace" (a minus and "behind" would say it twice)
+      const by = fmtInt(Math.abs(result.aheadBy ?? 0));
+      const pace = (result.aheadBy ?? 0) >= 0 ? `+${by} ahead of pace` : `${by} behind pace`;
+      return [`${title} · in progress · ${say(result.chasing)} ${pace}${brk}`];
     }
     case "finished": {
       if (!result.winner) return [`${title} · a tie on days${brk}`];
@@ -565,7 +651,10 @@ function climbBreakdown(records, journey, { leaveOutRivals = RACE_CONFIG.leaveOu
   for (let m = first; journey.milestones[m + c.milestoneStep]?.reached; m += c.milestoneStep) {
     const from = journey.milestones[m]?.reached;
     const to = journey.milestones[m + c.milestoneStep].reached;
-    if (!from) continue;
+    // starting between two milestones can mean reaching the higher one first (the lower one
+    // only counts after dropping under it and coming back). a step that ends before it starts
+    // isn't a step
+    if (!from || to.date <= from.date) continue;
 
     const inStep = sorted.filter((r) => r.t > from.date && r.t <= to.date && !rivals.has(r.opponent));
     const rated = inStep.filter((r) => r.rated);
@@ -617,6 +706,251 @@ function climbBreakdown(records, journey, { leaveOutRivals = RACE_CONFIG.leaveOu
   };
 }
 
+// --- shadow rating ---
+// what my rating would be if my unrated games had counted: start from a real (recorded)
+// rating and replay the games after it with an elo update.
+// records: one time class, oldest first, with pre-game numbers (preGamePass)
+
+// elo: the score I'd be expected to get at this rating against this opponent
+const shadowExpected = (shadow, oppPre) => 1 / (1 + Math.pow(10, (oppPre - shadow) / 400));
+
+// start at the anchor game's recorded rating, then every game after it in order, rated and
+// unrated: shadow += K * (score - expected). leaveOutRivals skips opponents with 30+ games
+// against me in this record set. returns the value before and after each game and the counts
+function shadowReplay(records, K, { anchorIndex = 0, leaveOutRivals = false } = {}) {
+  const anchor = records[anchorIndex];
+  if (!anchor) return null;
+  const rivals = leaveOutRivals ? rivalsOf(records) : new Set();
+  let shadow = anchor.rating;
+  const steps = [];
+  let rated = 0;
+  let unrated = 0;
+  let skipped = 0;
+  for (const g of records.slice(anchorIndex + 1)) {
+    // a rival's games, or one with no rating to compare against (a first rated game)
+    if (rivals.has(g.opponent) || g.oppPre == null) {
+      skipped++;
+      continue;
+    }
+    const expected = shadowExpected(shadow, g.oppPre);
+    const before = shadow;
+    shadow += K * (g.score - expected);
+    steps.push({ id: g.id, t: g.t, rated: g.rated, score: g.score, myPre: g.myPre, oppPre: g.oppPre, expected, before, after: shadow });
+    if (g.rated) rated++;
+    else unrated++;
+  }
+  return { start: anchor.rating, anchorT: anchor.t, end: shadow, steps, rated, unrated, skipped };
+}
+
+// chess.com uses glicko, not plain elo, so K is measured rather than guessed: replay only
+// my rated games from rated game 60 (end of placement) with each K, and see which stays
+// closest to the ratings chess.com actually recorded after each game
+const CALIBRATE_KS = [8, 10, 12, 14, 16, 18, 20, 22, 24];
+
+function calibrateK(records, ks = CALIBRATE_KS) {
+  const rated = records.filter((g) => g.rated && g.oppPre != null);
+  const startAt = RACE_CONFIG.placementGames - 1; // rated game 60
+  if (rated.length <= startAt + 1) return null;
+  const results = ks.map((K) => {
+    let shadow = rated[startAt].rating;
+    let errorSum = 0;
+    for (const g of rated.slice(startAt + 1)) {
+      shadow += K * (g.score - shadowExpected(shadow, g.oppPre));
+      errorSum += Math.abs(shadow - g.rating);
+    }
+    return { K, meanError: errorSum / (rated.length - startAt - 1) };
+  });
+  const best = results.reduce((a, b) => (b.meanError < a.meanError ? b : a));
+  return { K: best.K, meanError: best.meanError, games: rated.length - startAt - 1, results };
+}
+
+// the record index of rated game 60, the end of placement. null before that
+function placementAnchorIndex(records) {
+  let rated = 0;
+  for (let i = 0; i < records.length; i++) {
+    if (records[i].rated && records[i].oppPre != null && ++rated === RACE_CONFIG.placementGames) return i;
+  }
+  return null;
+}
+
+// how badly a prediction p missed the result s (1 / 0.5 / 0). 0 is perfect, ln 2 = 0.693 is
+// a coin flip's score on a decisive game. lower is better
+const logLoss = (s, p) => -(s * Math.log(p) + (1 - s) * Math.log(1 - p));
+
+// does the shadow rating know my rated results better than my official rating does?
+// replay from rated game 60, and before every rated game after it predict the result two
+// ways: (a) from my official rating going in (myPre), (b) from my shadow going in, which
+// has also seen my unrated games. both scored with log loss on the same games.
+// leaveOutRivals leaves rivals out of the replay and the scoring alike
+function compareSkillEstimates(records, K, { leaveOutRivals = false } = {}) {
+  const anchorIndex = placementAnchorIndex(records);
+  if (anchorIndex == null) return null;
+  const replay = shadowReplay(records, K, { anchorIndex, leaveOutRivals });
+  let official = 0;
+  let shadow = 0;
+  let games = 0;
+  for (const st of replay.steps) {
+    if (!st.rated || st.myPre == null) continue;
+    official += logLoss(st.score, shadowExpected(st.myPre, st.oppPre));
+    shadow += logLoss(st.score, shadowExpected(st.before, st.oppPre));
+    games++;
+  }
+  if (!games) return null;
+  return { official: official / games, shadow: shadow / games, games, unratedSeen: replay.unrated };
+}
+
+// everything the shadow card shows. anchor = my last rated game (its recorded rating is the
+// most recent real one), K measured from my own rated games, every opponent counted
+function shadowSummary(records, { leaveOutRivals = RACE_CONFIG.leaveOutRivals } = {}) {
+  const anchorIndex = records.map((g) => g.rated && g.oppPre != null).lastIndexOf(true);
+  if (anchorIndex < 0) return null;
+  const cal = calibrateK(records);
+  const K = cal?.K ?? 16;
+  const replay = shadowReplay(records, K, { anchorIndex, leaveOutRivals });
+  return {
+    anchorT: replay.anchorT,
+    start: replay.start,
+    end: replay.end,
+    change: replay.end - replay.start,
+    unrated: replay.unrated,
+    skipped: replay.skipped,
+    K,
+    calibration: cal,
+    check: compareSkillEstimates(records, K, { leaveOutRivals }),
+    leaveOutRivals,
+  };
+}
+
+// --- controls and cards ---
+
+// every 100 the milestone dropdown offers: above the lower settled start, up to the higher peak
+function milestoneOptions(A, B) {
+  const step = RACE_CONFIG.milestoneStep;
+  const settled = [A, B].map((p) => p.journey.settledStart).filter((x) => x != null);
+  const low = settled.length ? settledMilestone(Math.min(...settled)) : step;
+  const high = Math.max(A.journey.peak ?? 0, B.journey.peak ?? 0);
+  const out = [];
+  for (let m = low + step; m <= Math.floor(high / step) * step; m += step) out.push(m);
+  return out;
+}
+
+const shortDate = (t) => new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+// a volatility card: [title, lines...]
+function volatilityText(name, vol, rust) {
+  if (!vol || vol.label === "Not enough sessions") {
+    return [`${name} · Not enough sessions`, "Needs 3+ sessions of 5+ games in the last 12 months"];
+  }
+  const lines = [
+    `${name} · ${vol.label} (${Math.round(vol.volatility)})`,
+    `Form range ${Math.round(vol.formRange[0])}–${Math.round(vol.formRange[1])} across ${fmtInt(vol.sessions)} sessions`,
+  ];
+  const session = (s) => `${Math.round(s.perf)} (${unit(s.games, "game")}, ${shortDate(s.date)})`;
+  if (vol.best && vol.worst) lines.push(`Best session ${session(vol.best)} · worst ${session(vol.worst)}`);
+  if (rust?.change != null) {
+    const sign = rust.change >= 0 ? "+" : "";
+    lines.push(
+      `Back from a ${rust.breakDays}-day break: ${Math.round(rust.after.perf)} in the first ${rust.after.games} games vs ` +
+        `${Math.round(rust.before.perf)} in the ${rust.before.games} before (${sign}${Math.round(rust.change)})`
+    );
+  }
+  return lines;
+}
+
+// the shadow card: [title, lines...]
+function shadowText(sh) {
+  if (!sh) return ["Your shadow rating", "No rated games to start from"];
+  const lines = ["Your shadow rating"];
+  if (!sh.unrated) {
+    lines.push(`No unrated games since your last rated game (${shortDate(sh.anchorT)}, ${sh.start})`);
+    return lines;
+  }
+  const sign = sh.change >= 0 ? "+" : "";
+  lines.push(
+    `Since your last rated game (${shortDate(sh.anchorT)}, ${sh.start}): ${Math.round(sh.end)} ` +
+      `(${sign}${Math.round(sh.change)}) across ${unit(sh.unrated, "unrated game")}` +
+      (sh.leaveOutRivals && sh.skipped ? `, frequent opponents left out` : "")
+  );
+  lines.push("Estimated as if your unrated games were rated.");
+  if (sh.calibration) {
+    lines.push(`K = ${sh.K}, measured from your rated games (off by ${sh.calibration.meanError.toFixed(1)} points on average)`);
+  }
+  if (sh.check) {
+    const better = sh.check.shadow < sh.check.official;
+    lines.push(
+      `${better ? "It predicted" : "It didn't predict"} your rated results better than your official rating ` +
+        `(log loss ${sh.check.shadow.toFixed(4)} vs ${sh.check.official.toFixed(4)}, ${fmtInt(sh.check.games)} games)`
+    );
+  }
+  return lines;
+}
+
+// the data states as words, for next to the username. none is said elsewhere ("no bullet games")
+function statesText(states, journey, now) {
+  const out = [];
+  if (states.includes("placing")) out.push(`Still placing (${journey.ratedCount} of ${RACE_CONFIG.placementGames} rated games)`);
+  if (states.includes("inactive")) {
+    const days = Math.floor((now / 1000 - journey.lastT) / 86400);
+    const months = Math.floor(days / 30);
+    out.push(`Last played ${months >= 1 ? unit(months, "month") : unit(days, "day")} ago`);
+  }
+  if (states.includes("returning")) {
+    const brk = recentBreak(journey, now);
+    out.push(`Back from a ${brk.days}-day break`);
+  }
+  if (states.includes("sparse")) out.push("Few sessions in the last year");
+  return out.join(" · ");
+}
+
+// the footer, so a shared screenshot carries its own context
+function footerText(timeClass, asOfT) {
+  const tc = timeClass[0].toUpperCase() + timeClass.slice(1);
+  return `${tc} · rated games · as of ${shortDate(asOfT)}`;
+}
+
+// for the methodology view, next to performance.js's METHODOLOGY
+const RACE_METHODOLOGY = {
+  settledStart:
+    "Settled start is the median rating over rated games 30 to 60, after chess.com's placement " +
+    "games stop moving the rating quickly. A milestone at or below it (rounded to the nearest 100) " +
+    "is skipped for that player: they started there, so it isn't a fair race.",
+  reachedHeld:
+    "Reached means the first rated game at or above a milestone after being below it. A starting " +
+    "rating that's already above it doesn't count. Held means 20 rated games in a row at or above " +
+    "it, because bullet ratings spike: touching a rating once isn't the same as playing there.",
+  days:
+    "Races are counted in calendar days since the player's first game in that time class, because " +
+    "players improve between games too. Games (rated, unrated, or both) and active days (dates with " +
+    "at least one game) are shown next to it. The rating line itself only uses rated games.",
+  breaks:
+    "A break is 30 or more days without a game in that time class. A race that went through a break " +
+    "of 90 days or more says so.",
+  climb:
+    "The climb breakdown splits a journey into 100-point steps, each from the first time the " +
+    "rating reached one milestone to the first time it reached the next. For each step it shows " +
+    "the time and games it took, the performance in its rated games, and how the level in its " +
+    "unrated games moved from the first half (or first 500 games) to the last. Every opponent " +
+    "counts, frequent ones included. A change is described as \"improved by +59 during 3,937 " +
+    "unrated games\", never as something the unrated games caused, since study and time away " +
+    "also happened in that stretch.",
+  shadow:
+    "The shadow rating starts from your last rated game's rating and replays every game since, " +
+    "as if each one had been rated, with an Elo update of K times (score minus expected score). " +
+    "K is measured from your own rated games: the K whose replay stays closest to chess.com's " +
+    "real ratings. It's checked by asking whether it predicts your rated results better than " +
+    "your official rating does, and the card says if it doesn't. It estimates skill, not the " +
+    "exact rating you'd have, since matchmaking and opponents' ratings would have changed if " +
+    "those games had been rated. Every opponent counts, frequent ones included.",
+  volatility:
+    "Volatility is how much a player's session performances really swing, using sessions of 5 or " +
+    "more games in the last 12 months, after taking out what small samples swing by luck alone. " +
+    "Under 50 is Steady, 50 to 120 Normal, over 120 Streaky. The first 20 games after a break of " +
+    "60 days or more are left out, since rust isn't normal form.",
+  projection:
+    "Estimates fit a curve to the last 90 days of the smoothed rating line and say how long the next " +
+    "milestone might take at that pace. They're estimates, not data.",
+};
+
 // splitSessions, performanceRating and ratingError live in performance.js. in the popup
 // they're globals, in node they're required
 if (typeof splitSessions === "undefined" && typeof require !== "undefined") {
@@ -630,7 +964,11 @@ if (typeof module !== "undefined") {
   module.exports = {
     RACE_CONFIG, dayCount, median, settledStartOf, isArrived, settledMilestone, isSkipped,
     gamesBy, newJourneyState, journeyStep, finishJourney, journeyOf, smoothedAtDay,
-    dataStates, recentBreak, pathBreak, raceResult, gainSeries, headlineMilestone,
+    dataStates, recentBreak, pathBreak, raceResult, gainSeries, headlineMilestone, tileMilestones,
+    chartSeries, valueAt, leadChanges, defaultZoomEnd, milestoneOptions, volatilityText,
+    footerText, RACE_METHODOLOGY, shadowExpected, shadowReplay, calibrateK, placementAnchorIndex,
+    shadowSummary, shadowText, statesText,
+    logLoss, compareSkillEstimates,
     headlineText, tileText, percentile, volatilityFromSessions, volatilityOf, rustCheck,
     projectionOf, projectAt, rivalsOf, climbBreakdown,
   };

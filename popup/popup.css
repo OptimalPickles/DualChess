@@ -223,3 +223,206 @@ button.link {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* race */
+body.wide {
+  width: 760px;
+}
+
+#overview-race {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #eee;
+}
+
+#overview-race[hidden],
+#race-prompt[hidden] {
+  display: none;
+}
+
+.race-headline {
+  font-size: 13px;
+  font-weight: bold;
+  margin: 4px 0 6px;
+}
+
+.race-tile {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 4px 0;
+}
+
+.race-tile p {
+  margin: 1px 0;
+  font-size: 12px;
+  color: #444;
+}
+
+.race-tile .race-tile-title {
+  font-weight: bold;
+  color: #222;
+}
+
+#race-status {
+  font-size: 12px;
+  color: #555;
+}
+
+#race-prompt {
+  border: 1px solid #c90;
+  background: #fff8e6;
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+#race-prompt button {
+  font-size: 12px;
+  margin-right: 6px;
+}
+
+#race-chart {
+  width: 100%;
+  height: 380px;
+}
+
+#race-full[hidden] {
+  display: none;
+}
+
+#race-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 8px 0 4px;
+  font-size: 12px;
+}
+
+#race-controls[hidden],
+#race-footer[hidden] {
+  display: none;
+}
+
+#race-controls select {
+  font-size: 12px;
+}
+
+#race-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.race-card {
+  flex: 1 1 300px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.race-card p {
+  margin: 2px 0;
+  font-size: 12px;
+  color: #444;
+}
+
+#race-footer {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #777;
+}
+
+button.link.inline {
+  display: inline;
+  margin: 0;
+}
+
+/* the race picked in the milestone dropdown */
+.race-tile.selected {
+  border-color: #2563eb;
+}
+
+/* head-to-head by month, for rivalries */
+.h2h-monthly {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.h2h-monthly th,
+.h2h-monthly td {
+  padding: 2px 4px;
+  text-align: right;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.h2h-monthly th:first-child,
+.h2h-monthly td:first-child {
+  text-align: left;
+}
+
+.h2h-monthly th {
+  color: #777;
+  font-weight: normal;
+}
+
+#matchup {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+#matchup p {
+  margin: 2px 0;
+}
+
+/* the shadow rating card stands apart a little: it's an estimate, not a record */
+.race-card.shadow {
+  border-style: dashed;
+  border-color: #2563eb;
+}
+
+#race-climb details {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+#race-climb summary {
+  cursor: pointer;
+  font-weight: bold;
+  color: #333;
+}
+
+.climb {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.climb th,
+.climb td {
+  padding: 2px 4px;
+  text-align: right;
+  border-bottom: 1px solid #f0f0f0;
+  white-space: nowrap;
+}
+
+.climb th:first-child,
+.climb td:first-child {
+  text-align: left;
+}
+
+.climb th {
+  color: #777;
+  font-weight: normal;
+}
+
+.climb-note {
+  margin: 4px 0 0;
+  color: #555;
+}

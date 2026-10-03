@@ -54,16 +54,60 @@
                 <!-- when we last confirmed these numbers with chess.com -->
                 <p id="data-as-of"></p>
                 <div id="prediction"></div>
+                <!-- rivalries only (30+ games): the matchup rating and the field ratings it's built on -->
+                <div id="matchup"></div>
                 <div id="h2h"></div>
+            </div>
+
+            <!-- the race in two lines, from cache only. the full race loads when it's opened -->
+            <div id="overview-race" hidden>
+                <div id="overview-race-summary"></div>
+                <button type="button" id="open-race">Open race</button>
             </div>
 
             <button id="restart-tally" type="button" hidden>Restart session tally</button>
             <button id="change-account" type="button" hidden>Not you? Change tracked account</button>
         </section>
 
-        <!-- the chart comes in phase 5 -->
         <section id="view-race" hidden>
-            <p class="placeholder">The race chart isn't built yet. It will compare both players' rating journeys here.</p>
+            <p id="race-status"></p>
+            <!-- asks before a big download, see openRace() -->
+            <div id="race-prompt" hidden>
+                <p id="race-prompt-text"></p>
+                <button type="button" id="race-load">Load it</button>
+                <button type="button" id="race-decline">Not now</button>
+            </div>
+            <div id="race-summary"></div>
+            <!-- the chart's settings, for this popup only -->
+            <div id="race-controls" hidden>
+                <select id="race-x" title="X-axis">
+                    <option value="days">Days</option>
+                    <option value="games">Games</option>
+                </select>
+                <select id="race-view" title="View">
+                    <option value="rating">Rating</option>
+                    <option value="gain">Rating gained since start</option>
+                </select>
+                <label><input type="checkbox" id="race-smoothed" checked /> Smoothed</label>
+                <select id="race-milestone" title="Milestone"></select>
+                <select id="race-counted" title="Games counted">
+                    <option value="both">Rated + unrated games</option>
+                    <option value="rated">Rated games</option>
+                    <option value="unrated">Unrated games</option>
+                </select>
+            </div>
+            <!-- the race for the milestone picked above -->
+            <div id="race-selected"></div>
+            <div id="race-chart"></div>
+            <button type="button" id="race-full" class="link" hidden>Show full history</button>
+            <div id="race-cards"></div>
+            <!-- each player's climb, 100 points at a time (folded until opened) -->
+            <div id="race-climb"></div>
+            <!-- so a screenshot says what it is without any other context -->
+            <footer id="race-footer" hidden>
+                <span id="race-footer-text"></span> ·
+                <button type="button" id="race-methodology" class="link inline">How this is calculated</button>
+            </footer>
         </section>
 
         <!-- filled from METHODOLOGY in performance.js -->
@@ -74,9 +118,12 @@
 
         <button type="button" id="open-methodology" class="link">How this is calculated</button>
 
-        <!-- performance.js, fairplay.js, then data.js, then popup.js. each uses the ones before it -->
+        <!-- performance.js, fairplay.js, race.js, rivalry.js, data.js, then popup.js. each uses the ones
+             before it. echarts isn't here: it's loaded the first time the race view opens -->
         <script src="../scripts/performance.js"></script>
         <script src="../scripts/fairplay.js"></script>
+        <script src="../scripts/race.js"></script>
+        <script src="../scripts/rivalry.js"></script>
         <script src="../scripts/data.js"></script>
         <script src="popup.js"></script>
     </body>

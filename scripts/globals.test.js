@@ -11,9 +11,8 @@ const vm = require("node:vm");
 test("every popup script loads into one shared scope without clashing", () => {
   const root = path.join(__dirname, "..");
   const html = fs.readFileSync(path.join(root, "popup/main.html"), "utf8");
-  // the scripts in main.html's order, plus race.js
+  // the scripts in main.html's order
   const files = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => path.join(root, "popup", m[1]));
-  files.splice(files.length - 1, 0, path.join(__dirname, "race.js"));
 
   // just enough browser for the top-level code to run
   const el = () => ({ addEventListener() {}, children: [], appendChild() {}, setAttribute() {}, classList: { add() {}, remove() {} } });

@@ -307,7 +307,7 @@ function wdl(games) {
   return t;
 }
 
-async function loadPerformance(username, data, now, settings, timeClass) {
+async function loadPerformance(username, data, now, settings, timeClass, opponent = null) {
   if (!timeClass) return null;
 
   const opts = { timeClass, rated: settings.rated };
@@ -363,12 +363,29 @@ async function loadPerformance(username, data, now, settings, timeClass) {
     official: data?.stats?.[`chess_${timeClass}`]?.last?.rating ?? null,
     session,
     tally: { start: tallyStart, count: tallyGames.length, wdl: wdl(tallyGames) },
+    field: opponent ? fieldRating(all, opts, range, now, timeClass, opponent) : null,
     // for "only 7 of 20 found since ..."
     requested: range.type === "games" ? range.n : null,
     searchedSince: all.length ? Math.min(...all.map((g) => g.t)) : null,
   };
   console.log(`[Performance] loadPerformance("${username}"):`, result);
   return result;
+}
+
+// how they play against everyone except the other player: the same time class and range,
+// without the games between the two (so the head-to-head can't feed its own anchor). the 6
+// months already loaded are what "extend back if needed" draws on for a games range
+function fieldRating(all, opts, range, now, timeClass, opponent) {
+  const name = opponent.toLowerCase();
+  const games = applyRange(filterGames(all.filter((g) => g.opponent !== name), opts), range, now);
+  const perf = performanceRating(games);
+  const stab = stability(sessionPerformances(all, opts, now, name));
+  return {
+    perf,
+    error: ratingError(games, perf),
+    count: rateable(games).length,
+    conf: confidence(games, perf, now, timeClass, stab.stability),
+  };
 }
 
 function timeAgo(t, now) {
@@ -496,8 +513,65 @@ function matchupPrediction(entries, perfs) {
 }
 
 // h2h is null until the scan finishes, then this runs again with it
-// pending = the h2h scan hasn't finished yet
-function renderPrediction(container, pred, h2h, pending) {
+// a field rating can anchor the matchup only if it's trustworthy: Medium+ confidence,
+// stability included
+const anchorOf = (p) =>
+  p?.field?.perf != null && (p.field.conf?.label === "High" || p.field.conf?.label === "Medium")
+    ? { rating: p.field.perf, error: p.field.error }
+    : null;
+
+function matchupOf(perfs, h2h, now) {
+  const gap = matchupGap(h2h.games, now);
+  return { gap, blended: blendMatchup(anchorOf(perfs[0]), anchorOf(perfs[1]), gap), fields: perfs.map((p) => p?.field ?? null) };
+}
+
+// "When you play each other: You 2027 vs legendary9000 1854 (±55)"
+function renderMatchup(container, matchup) {
+  container.innerHTML = "";
+  if (!matchup) return;
+  const line = (text, className) => {
+    const el = document.createElement("p");
+    el.textContent = text;
+    if (className) el.className = className;
+    container.appendChild(el);
+  };
+  const [a, b] = current.pair;
+  const youA = a === current.primary;
+  const say = (name) => (name === current.primary ? "You" : name);
+  const [fa, fb] = matchup.fields;
+  const fieldText = (name, f) =>
+    f?.perf != null ? `${say(name)} ${f.perf} ± ${Math.round(f.error)} (${f.conf?.label ?? "Low"})` : `${say(name)} —`;
+
+  const m = matchup.blended;
+  if (!m) {
+    line("Not enough reliable games to rate this matchup", "h2h-title");
+  } else {
+    const when = youA ? "When you play each other" : `When ${a} and ${b} play each other`;
+    line(`${when}: ${say(a)} ${Math.round(m.me)} vs ${say(b)} ${Math.round(m.opp)} (±${Math.round(m.error)})`, "h2h-title");
+    // how each plays in this matchup compared to against everyone else. only with both
+    // anchors: with one, that player's matchup rating IS their field rating (always +0),
+    // and the other's field rating wasn't trusted enough to anchor in the first place
+    if (m.anchors.me && m.anchors.opp) {
+      const dB = Math.round(m.opp - fb.perf);
+      const dA = Math.round(m.me - fa.perf);
+      const theirs = `${b} plays ${dB >= 0 ? `+${dB} above` : `${-dB} below`} their field level against ${youA ? "you" : a}`;
+      const mine = youA ? `you play ${dA >= 0 ? "+" : ""}${dA} vs yours` : `${a} plays ${dA >= 0 ? "+" : ""}${dA} vs theirs`;
+      line(`${theirs}; ${mine}`, "h2h-sub");
+    }
+    const whose = (name) => (name === current.primary ? "your" : `${name}'s`);
+    const anchors =
+      m.anchors.me && m.anchors.opp
+        ? "Anchored on both field ratings"
+        : m.anchors.me
+          ? `Anchored on ${whose(a)} field rating (${whose(b)} isn't reliable enough)`
+          : `Anchored on ${whose(b)} field rating (${whose(a)} isn't reliable enough)`;
+    line(anchors, "h2h-sub");
+  }
+  line(`Field ratings, without each other: ${fieldText(a, fa)} · ${fieldText(b, fb)}`, "h2h-sub");
+}
+
+// pending = the h2h scan hasn't finished yet. with a matchup rating, both expectations show
+function renderPrediction(container, pred, h2h, pending, matchup) {
   container.innerHTML = "";
   if (!pred) return;
   const line = (text, className) => {
@@ -510,11 +584,12 @@ function renderPrediction(container, pred, h2h, pending) {
   let h2hText = pending ? " · h2h loading…" : " · h2h unavailable";
   if (h2h?.total) {
     const actual = (h2h.aWins + h2h.draws / 2) / h2h.total;
-    h2hText = ` · h2h actual ${pct(actual)} (${h2h.total} games)`;
+    h2hText = ` · h2h actual ${pct(actual)} (${h2h.total.toLocaleString("en-US")} games)`;
   } else if (h2h) {
     h2hText = " · no h2h games yet";
   }
-  line(`${pred.a.username}: expected ${pct(pred.expected)}${h2hText}`, "h2h-title");
+  const forMatchup = matchup?.blended ? ` · expected for this matchup ${pct(expectedScore(matchup.blended.me, matchup.blended.opp))}` : "";
+  line(`${pred.a.username}: expected by rating ${pct(pred.expected)}${forMatchup}${h2hText}`, "h2h-title");
   line(
     `${pred.a.username} ${pred.a.rating} (${pred.a.source}) vs ${pred.b.username} ${pred.b.rating} (${pred.b.source})`,
     "h2h-sub"
@@ -601,6 +676,46 @@ function renderHeadToHead(container, h2h, pending) {
     recent.appendChild(li);
   }
   container.appendChild(recent);
+
+  // a real rivalry (30+ games): every game in the console, and how it went month by month
+  if (isRivalry(h2h.games)) {
+    const rows = h2hRows(h2h.games);
+    console.log(`[Performance] h2h rows: ${h2h.a} vs ${h2h.b}, ${rows.length} games, ratings going into each game`);
+    console.table(
+      rows.map((r) => ({
+        date: new Date(r.t * 1000).toLocaleDateString(),
+        class: r.timeClass,
+        rated: r.rated,
+        [`${h2h.a} then`]: r.me,
+        [`${h2h.b} then`]: r.opp,
+        gap: r.gap,
+        expected: Number(r.expected.toFixed(3)),
+        actual: r.actual,
+      }))
+    );
+    renderMonthly(container, h2hMonthly(rows).slice(0, 12));
+  }
+}
+
+// month, games, average gap at the time, expected %, actual %
+function renderMonthly(container, months) {
+  const table = document.createElement("table");
+  table.className = "h2h-monthly";
+  const row = (cells, tag = "td") => {
+    const tr = document.createElement("tr");
+    for (const text of cells) {
+      const cell = document.createElement(tag);
+      cell.textContent = text;
+      tr.appendChild(cell);
+    }
+    table.appendChild(tr);
+  };
+  row(["Month", "Games", "Avg gap", "Expected", "Actual"], "th");
+  for (const m of months) {
+    const gap = Math.round(m.avgGap);
+    row([m.month, m.games.toLocaleString("en-US"), `${gap >= 0 ? "+" : ""}${gap}`, `${m.expectedPct.toFixed(0)}%`, `${m.actualPct.toFixed(0)}%`]);
+  }
+  container.appendChild(table);
 }
 
 // "3:42 PM" today, "Sep 30, 3:42 PM" before that
@@ -626,7 +741,7 @@ async function buildView() {
 
   const now = Date.now();
   const perfs = await Promise.all(
-    entries.map((entry, i) => loadPerformance(entry.username, results[i], now, settings, timeClass))
+    entries.map((entry, i) => loadPerformance(entry.username, results[i], now, settings, timeClass, pair ? pair[1 - i] : null))
   );
   // only when two people are actually playing each other
   const pred =
@@ -634,13 +749,19 @@ async function buildView() {
   const h2hAll = pair ? await fetchHeadToHead(pair[0], pair[1], () => {}, opt) : null;
   const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, now);
 
+  // the matchup rating, for a real rivalry: the gap from results, anchored on field ratings
+  const matchup = pair && h2h && isRivalry(h2h.games) ? matchupOf(perfs, h2h, now) : null;
+
+  // the race from cache only. it's only ever downloaded from the race view
+  const race = pair && timeClass ? await raceFromCache(pair, timeClass) : null;
+
   // the older of the players' last confirmed times, so it never claims more than the staler card
   const asOfs = await Promise.all(entries.map((entry) => dataAsOf(entry.username)));
   const asOf = asOfs.every((t) => t != null) ? Math.min(...asOfs) : null;
 
   // complete = every card has real numbers, not "not loaded yet"
   const complete = results.every(Boolean) && perfs.every(Boolean);
-  return { settings, results, timeClass, source, now, perfs, pred, h2h, asOf, complete };
+  return { settings, results, timeClass, source, now, perfs, pred, h2h, matchup, race, asOf, complete };
 }
 
 // the numbers on screen, minus anything that only moves because the clock moved,
@@ -661,6 +782,8 @@ function viewSignature(view) {
     h2hSynced: Boolean(current.h2hSynced),
     // to the minute, so a sync that only confirmed nothing changed still moves the time
     asOf: view.asOf == null ? null : Math.floor(view.asOf / 60000),
+    race: view.race && [view.race.headline, ...view.race.tiles.flat()],
+    matchup: view.matchup && [view.matchup.blended?.me, view.matchup.blended?.opp, view.matchup.gap?.G].map((x) => (x == null ? null : Math.round(x))),
     stats: view.results.map(ratings),
     perfs: view.perfs.map(perf),
     h2h: h && [h.total, h.aWins, h.draws, h.bWins, h.last30.total, h.games[0]?.t ?? null],
@@ -703,8 +826,14 @@ async function render({ final = false } = {}) {
   document.getElementById("data-as-of").textContent = view.asOf ? `Data as of ${formatAsOf(view.asOf, now)}` : "";
 
   const pending = Boolean(pair) && !h2h && !current.h2hSynced;
-  renderPrediction(document.getElementById("prediction"), pred, h2h, pending);
+  renderPrediction(document.getElementById("prediction"), pred, h2h, pending, view.matchup);
+  renderMatchup(document.getElementById("matchup"), view.matchup);
   if (pair) renderHeadToHead(document.getElementById("h2h"), h2h, pending);
+
+  // the race view uses the same time class as the cards
+  current.timeClass = timeClass;
+  document.getElementById("overview-race").hidden = !pair;
+  renderRaceSummary(document.getElementById("overview-race-summary"), view.race);
 
   // dropdowns work during the h2h scan
   document.body.classList.remove("is-loading");
@@ -770,7 +899,7 @@ function showLocked() {
   current = null;
   document.body.classList.add("locked");
   document.getElementById("status").textContent = LOCKED_TEXT;
-  for (const id of ["primary-info", "opponent-info", "prediction", "h2h"]) {
+  for (const id of ["primary-info", "opponent-info", "prediction", "matchup", "h2h"]) {
     document.getElementById(id).innerHTML = "";
   }
   refreshTimer = setTimeout(() => init(), REFRESH_MS);
@@ -794,6 +923,7 @@ async function init() {
   restartBtn.hidden = true;
   document.getElementById("h2h").innerHTML = "";
   document.getElementById("prediction").innerHTML = "";
+  document.getElementById("matchup").innerHTML = "";
   document.getElementById("data-as-of").textContent = "";
 
   document.body.classList.add("is-loading");
@@ -885,7 +1015,7 @@ async function init() {
     controls.hidden = false;
     restartBtn.hidden = false;
 
-    current = { entries, pair, mode, gameRecord: lock.record, baseStatus: statusEl.textContent };
+    current = { entries, pair, mode, primary: primaryUsername, gameRecord: lock.record, baseStatus: statusEl.textContent };
     lastSignature = null;
     // anyone shown keeps their stored data for another 30 days
     await markViewed([primaryUsername, ...entries.map((e) => e.username)]);
@@ -901,6 +1031,8 @@ async function init() {
     if (gen === initGen && changed.some((n) => entries.some((e) => e.username === n))) {
       await render({ final: true });
     }
+    // a tab change while looking at the race: show the new page's race
+    if (gen === initGen && !document.getElementById("view-race").hidden) openRace();
   } catch (err) {
     console.error("[Performance] init() failed:", err);
     statusEl.textContent = "Something went wrong - check the popup's console (right-click the extension icon > Inspect popup).";
@@ -916,7 +1048,8 @@ for (const [id, field] of [["ctl-time", "time"], ["ctl-range", "range"], ["ctl-r
     await chrome.storage.local.set({ [SETTINGS_KEY]: { ...settings, [field]: e.target.value } });
     console.log(`[Performance] ${field} -> ${e.target.value}`);
     // everything needed is already in storage, so this makes no requests
-    render({ final: true });
+    await render({ final: true });
+    if (!document.getElementById("view-race").hidden) openRace();
   });
 }
 
@@ -940,6 +1073,638 @@ document
     init();
   });
 
+// --- race view ---
+// the full histories are only downloaded here, and a big one is asked about first
+
+// asked about at this size: chess.com sends ~4 KB a game, so 10 MB is ~2,500 games
+const LARGE_DOWNLOAD_BYTES = 10 * 1024 * 1024;
+let raceGen = 0;
+let echartsLoading = null;
+
+// echarts is ~1 MB, so it's only loaded the first time the race view opens
+function loadECharts() {
+  echartsLoading ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "../lib/echarts.min.js";
+    script.onload = () => resolve(window.echarts);
+    script.onerror = () => {
+      echartsLoading = null;
+      reject(new Error("couldn't load echarts"));
+    };
+    document.head.appendChild(script);
+  });
+  return echartsLoading;
+}
+
+// the time class someone has played most, for "no bullet games, try blitz"
+function mostPlayedTimeClass(stats) {
+  let best = null;
+  for (const tc of ["bullet", "blitz", "rapid", "daily"]) {
+    const r = stats?.[`chess_${tc}`]?.record;
+    const games = r ? r.win + r.loss + r.draw : 0;
+    if (games && (!best || games > best.games)) best = { tc, games };
+  }
+  return best?.tc ?? null;
+}
+
+// headline + tiles for a pair. "You" for the primary user, everywhere
+async function raceSummary(pair, journeys, timeClass, counted = RACE_CONFIG.gamesCounted) {
+  const labels = current.primary ? { [current.primary]: "You" } : {};
+  const say = (name) => labels[name] ?? name;
+  const empty = pair.findIndex((_, i) => !journeys[i].games);
+  if (empty >= 0) {
+    const stats = await fetchStats(pair[empty], { cacheOnly: true });
+    const other = mostPlayedTimeClass(stats?.stats);
+    const lead = say(pair[empty]) === "You" ? "You have" : `${say(pair[empty])} has`;
+    return { headline: `${lead} no ${timeClass} games${other && other !== timeClass ? `. Try ${other}` : ""}`, tiles: [] };
+  }
+  const [A, B] = pair.map((name, i) => ({ name, journey: journeys[i] }));
+  const head = headlineMilestone(A, B, { counted });
+  return {
+    headline: headlineText(head, A, B, labels),
+    tiles: tileMilestones(A, B).map((m) => tileText(raceResult(m, A, B, { counted }), labels, { counted })),
+    // the milestone the chart marks first: the headline's, else the top tile's
+    milestone: head?.m ?? tileMilestones(A, B).at(-1) ?? null,
+  };
+}
+
+// from storage alone: null unless both journeys are fully cached
+async function raceFromCache(pair, timeClass) {
+  const journeys = await Promise.all(pair.map((u) => fetchJourney(u, timeClass, { cacheOnly: true })));
+  if (journeys.includes(null)) return null;
+  return { ...(await raceSummary(pair, journeys, timeClass)), journeys };
+}
+
+// a tile or card: the first line is its title
+function renderTile(container, lines, className = "race-tile") {
+  const tile = document.createElement("div");
+  tile.className = className;
+  lines.forEach((text, i) => {
+    const p = document.createElement("p");
+    p.textContent = text;
+    if (i === 0) p.className = "race-tile-title";
+    tile.appendChild(p);
+  });
+  container.appendChild(tile);
+}
+
+function renderRaceSummary(container, race) {
+  container.innerHTML = "";
+  if (!race) return;
+  const headline = document.createElement("p");
+  headline.className = "race-headline";
+  headline.textContent = race.headline;
+  container.appendChild(headline);
+  for (const lines of race.tiles) renderTile(container, lines);
+}
+
+const formatMB = (bytes) => `${Math.max(1, Math.round(bytes / (1024 * 1024)))} MB`;
+
+// "load it or not?", like askWhoIsPrimary: a box in the page, resolved by a button
+function askToLoadHistory(large, timeClass) {
+  return new Promise((resolve) => {
+    const box = document.getElementById("race-prompt");
+    const labels = current.primary ? { [current.primary]: "your" } : {};
+    const whose = (name) => labels[name] ?? `${name}'s`;
+    const parts = large.map((e) => `${whose(e.name)} full history is about ${e.missingMonths} months, ~${formatMB(e.bytes)} to download`);
+    // it starts a sentence, so "your" becomes "Your"
+    const list = parts.join("; ").replace(/^./, (c) => c.toUpperCase());
+    document.getElementById("race-prompt-text").textContent =
+      `The race needs every ${timeClass} game. ${list}. It's saved after the first time. Load it?`;
+    box.hidden = false;
+    const finish = (answer) => {
+      box.hidden = true;
+      resolve(answer);
+    };
+    document.getElementById("race-load").addEventListener("click", () => finish(true), { once: true });
+    document.getElementById("race-decline").addEventListener("click", () => finish(false), { once: true });
+  });
+}
+
+async function openRace() {
+  const gen = ++raceGen;
+  const stale = () => gen !== raceGen;
+  const status = document.getElementById("race-status");
+  const summary = document.getElementById("race-summary");
+  document.getElementById("race-prompt").hidden = true;
+
+  if (!current?.pair) {
+    summary.innerHTML = "";
+    status.textContent = "Open a game, or a profile of someone else, to see a race.";
+    return;
+  }
+  const { pair, timeClass } = current;
+  if (!timeClass) {
+    status.textContent = "No time control yet. Pick one on Overview.";
+    return;
+  }
+  // the chart needs it next, so it starts loading now, in the background
+  loadECharts().catch((err) => console.warn("[Performance] echarts:", err));
+
+  // whatever's already saved shows right away
+  const cached = await raceFromCache(pair, timeClass);
+  if (stale()) return;
+  renderRaceSummary(summary, cached);
+  if (cached) {
+    current.race = { timeClass, journeys: cached.journeys, milestone: cached.milestone };
+    showRace(gen);
+  } else {
+    clearRaceChart();
+  }
+
+  status.textContent = "Checking how much history this needs…";
+  const estimates = await Promise.all(pair.map((u) => estimateHistory(u)));
+  if (stale()) return;
+  const approved = (await chrome.storage.session.get("raceApproved")).raceApproved || {};
+  const large = estimates.filter((e) => e && e.bytes >= LARGE_DOWNLOAD_BYTES && !approved[e.name]);
+  console.log("[Performance] race history estimates:", estimates);
+  if (large.length) {
+    status.textContent = "";
+    const ok = await askToLoadHistory(large, timeClass);
+    if (stale()) return;
+    if (!ok) {
+      status.textContent = cached
+        ? "Showing what's already saved. Open the race again to load the rest."
+        : "Race not loaded. Open it again whenever you're ready.";
+      return;
+    }
+    // asked once per browser session, not every time the view opens
+    for (const e of large) approved[e.name] = true;
+    await chrome.storage.session.set({ raceApproved: approved });
+  }
+
+  const progress = {};
+  const onProgress = (name) => (done, total) => {
+    progress[name] = [done, total];
+    const [d, t] = Object.values(progress).reduce(([a, b], [x, y]) => [a + x, b + y], [0, 0]);
+    if (!stale() && t > 1) status.textContent = `Loading race… ${d}/${t} months`;
+  };
+  const journeys = await Promise.all(pair.map((u) => fetchJourney(u, timeClass, { onProgress: onProgress(u) })));
+  if (stale()) return;
+  if (journeys.includes(null)) {
+    status.textContent = "Couldn't load the race. Try again in a minute.";
+    return;
+  }
+  // kept for the chart
+  const loaded = await raceSummary(pair, journeys, timeClass);
+  current.race = { timeClass, journeys, milestone: loaded.milestone };
+  renderRaceSummary(summary, loaded);
+  showRace(gen);
+  const missing = journeys.flatMap((j) => j.missingMonths || []);
+  status.textContent = missing.length
+    ? `chess.com couldn't send ${missing.length} month${missing.length === 1 ? "" : "s"}, so some games may be missing.`
+    : "";
+  // overview can show it from cache now too
+  render({ final: true });
+}
+
+// --- race chart ---
+// the app's colors: you are blue and solid, the other player amber and dashed, so the chart
+// still reads in grayscale and for colorblind readers. spectating: the first player is blue
+const RACE_COLORS = { primary: "#2563eb", other: "#d97706" };
+const PLACEMENT_GAMES = RACE_CONFIG.placementGames;
+// the chart's settings, set by the race controls. kept for this popup, not saved
+const raceOptions = { x: "days", view: "rating", smoothed: true, counted: RACE_CONFIG.gamesCounted, milestone: null, key: null };
+let raceChart = null;
+
+const fmtDate = (t) => new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+function clearRaceChart() {
+  raceChart?.clear();
+  for (const id of ["race-full", "race-controls", "race-footer"]) document.getElementById(id).hidden = true;
+  document.getElementById("race-selected").innerHTML = "";
+  document.getElementById("race-cards").innerHTML = "";
+  document.getElementById("race-climb").innerHTML = "";
+}
+
+const raceLabels = () => (current.primary ? { [current.primary]: "You" } : {});
+const racePlayers = () => current.pair.map((name, i) => ({ name, journey: current.race.journeys[i] }));
+
+// a race is on screen: controls, the chosen milestone's race, chart, cards, footer
+async function showRace(gen) {
+  const [A, B] = racePlayers();
+  // a new race starts on its own headline milestone. the other settings carry over
+  const key = `${current.pair.join(":")}:${current.race.timeClass}`;
+  if (raceOptions.key !== key) {
+    raceOptions.key = key;
+    raceOptions.milestone = current.race.milestone;
+  }
+  const select = document.getElementById("race-milestone");
+  select.innerHTML = "";
+  for (const m of milestoneOptions(A, B)) {
+    const option = document.createElement("option");
+    option.value = String(m);
+    option.textContent = `Race to ${m}`;
+    select.appendChild(option);
+  }
+  if (raceOptions.milestone != null) select.value = String(raceOptions.milestone);
+  document.getElementById("race-x").value = raceOptions.x;
+  document.getElementById("race-view").value = raceOptions.view;
+  document.getElementById("race-smoothed").checked = raceOptions.smoothed;
+  document.getElementById("race-counted").value = raceOptions.counted;
+  document.getElementById("race-controls").hidden = false;
+
+  renderSelectedRace();
+  drawRaceChart();
+  await Promise.all([renderRaceCards(gen), renderRaceFooter(gen)]);
+}
+
+// the race for the milestone in the dropdown, as a tile. there's no milestone in the gain view
+function renderSelectedRace() {
+  const container = document.getElementById("race-selected");
+  container.innerHTML = "";
+  document.getElementById("race-milestone").disabled = raceOptions.view === "gain";
+  if (raceOptions.view === "gain" || raceOptions.milestone == null) return;
+  const [A, B] = racePlayers();
+  const lines = tileText(raceResult(raceOptions.milestone, A, B, { counted: raceOptions.counted }), raceLabels(), { counted: raceOptions.counted });
+  renderTile(container, lines, "race-tile selected");
+}
+
+// one volatility card per player, from storage (every month was loaded for the race)
+async function renderRaceCards(gen) {
+  const container = document.getElementById("race-cards");
+  const climb = document.getElementById("race-climb");
+  const now = Date.now();
+  const tc = current.race.timeClass;
+  // each player's whole history in this time class, with pre-game numbers, read from storage
+  // once (the race loaded every month) and used by the cards, the shadow, and the climb
+  const players = await Promise.all(
+    racePlayers().map(async (pl) => ({ ...pl, records: await recentRecords(pl.name, tc, 0) }))
+  );
+  if (gen !== raceGen) return;
+
+  const say = (name) => (name === current.primary ? "You" : name);
+  container.innerHTML = "";
+  for (const { name, journey, records } of players) {
+    if (!records) {
+      renderTile(container, [`${name} · Not enough sessions`, "Couldn't read their games"], "race-card");
+      continue;
+    }
+    const rust = rustCheck(records, journey, now);
+    const lines = volatilityText(name, volatilityOf(records, now), rust);
+    // placing, inactive, returning, sparse: said right under the name. the rust line already
+    // says "back from a 117-day break", so "returning" isn't said twice
+    const states = statesText(dataStates(records, journey, now).filter((st) => !(rust && st === "returning")), journey, now);
+    if (states) lines.splice(1, 0, states);
+    renderTile(container, lines, "race-card");
+  }
+
+  // the shadow rating is mine only
+  const me = players.find((pl) => pl.name === current.primary && pl.records);
+  if (me) renderTile(container, shadowText(shadowSummary(me.records)), "race-card shadow");
+
+  climb.innerHTML = "";
+  for (const { name, journey, records } of players) {
+    if (records) renderClimb(climb, say(name), climbBreakdown(records, journey));
+  }
+}
+
+// one player's climb, 100 points at a time, folded away until it's opened
+function renderClimb(container, who, { steps, summary }) {
+  const details = document.createElement("details");
+  const title = document.createElement("summary");
+  title.textContent = `${who === "You" ? "Your" : `${who}'s`} climb, 100 points at a time`;
+  details.appendChild(title);
+  if (!steps.length) {
+    const p = document.createElement("p");
+    p.textContent = "No full 100-point steps above where they settled yet.";
+    details.appendChild(p);
+    container.appendChild(details);
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "climb";
+  const row = (cells, tag = "td") => {
+    const tr = document.createElement("tr");
+    for (const text of cells) {
+      const cell = document.createElement(tag);
+      cell.textContent = text;
+      tr.appendChild(cell);
+    }
+    table.appendChild(tr);
+  };
+  // counts get commas, ratings don't ("3,937 games", "1817 → 1861")
+  const n = (x) => (x == null ? "—" : Math.round(x).toLocaleString("en-US"));
+  const rating = (x) => (x == null ? "—" : String(Math.round(x)));
+  const sn = (x) => (x == null ? "—" : `${x >= 0 ? "+" : ""}${Math.round(x)}`);
+  const pm = (p) => (p?.perf == null ? "—" : `${Math.round(p.perf)} ± ${Math.round(p.error)}`);
+  row(["Step", "Days", "Active", "Rated", "Unrated", "Rated perf", "Unrated level", "Change", "Per 1,000", "Lag", "Agree"], "th");
+  for (const st of steps) {
+    row([
+      `${st.from}–${st.to}`,
+      n(st.days),
+      n(st.activeDays),
+      n(st.ratedGames),
+      n(st.unratedGames),
+      pm(st.ratedPerf),
+      st.unratedPerfStart ? `${rating(st.unratedPerfStart.perf)} → ${rating(st.unratedPerfEnd.perf)}` : "—",
+      sn(st.unratedChange),
+      sn(st.per1000),
+      sn(st.ratingLag),
+      st.agree == null ? "—" : st.agree ? "yes" : "no",
+    ]);
+  }
+  details.appendChild(table);
+
+  const note = (text) => {
+    const p = document.createElement("p");
+    p.className = "climb-note";
+    p.textContent = text;
+    details.appendChild(p);
+  };
+  // the latest step with unrated numbers, in words: what happened, not what caused it
+  const latest = [...steps].reverse().find((st) => st.unratedChange != null);
+  if (latest) {
+    // "Improved by +56", "Dropped by 124" (a minus and "dropped" would say it twice)
+    const moved = latest.unratedChange >= 0 ? `Improved by ${sn(latest.unratedChange)}` : `Dropped by ${n(-latest.unratedChange)}`;
+    note(`${latest.from} → ${latest.to}: ${moved} during ${n(latest.unratedCount)} unrated games`);
+  }
+  if (summary?.compared) {
+    note(
+      `Rated and unrated agreed in ${summary.agreed} of ${summary.compared} steps · ` +
+        `on average rated was ${Math.abs(Math.round(summary.avgDiff))} ${summary.avgDiff >= 0 ? "above" : "below"} unrated`
+    );
+  }
+  note("Lag = unrated level at the start of a step minus the official rating then.");
+  container.appendChild(details);
+}
+
+// "Bullet · rated games · as of Oct 2, 2026": the older of the two players' confirmed times
+async function renderRaceFooter(gen) {
+  const times = await Promise.all(current.pair.map((u) => dataAsOf(u)));
+  if (gen !== raceGen) return;
+  const asOf = times.every((t) => t != null) ? Math.min(...times) : Date.now();
+  document.getElementById("race-footer-text").textContent = footerText(current.race.timeClass, asOf / 1000);
+  document.getElementById("race-footer").hidden = false;
+}
+
+// controls: redraw from what's already loaded, no requests
+function onRaceControl() {
+  raceOptions.x = document.getElementById("race-x").value;
+  raceOptions.view = document.getElementById("race-view").value;
+  raceOptions.smoothed = document.getElementById("race-smoothed").checked;
+  raceOptions.milestone = Number(document.getElementById("race-milestone").value) || raceOptions.milestone;
+  raceOptions.counted = document.getElementById("race-counted").value;
+  if (!current?.race) return;
+  renderSelectedRace();
+  drawRaceChart();
+  // the tiles' game counts follow the games toggle too
+  raceSummary(current.pair, current.race.journeys, current.race.timeClass, raceOptions.counted).then((race) =>
+    renderRaceSummary(document.getElementById("race-summary"), race)
+  );
+}
+for (const id of ["race-x", "race-view", "race-smoothed", "race-milestone", "race-counted"]) {
+  document.getElementById(id).addEventListener("change", onRaceControl);
+}
+document.getElementById("race-methodology").addEventListener("click", () => showView("methodology"));
+
+async function drawRaceChart() {
+  if (!current?.race || !current.pair) return;
+  let echarts;
+  try {
+    echarts = await loadECharts();
+  } catch {
+    document.getElementById("race-status").textContent = "Couldn't load the chart.";
+    return;
+  }
+  const el = document.getElementById("race-chart");
+  if (!raceChart) {
+    raceChart = echarts.init(el);
+    // the chart follows its box's width
+    new ResizeObserver(() => raceChart.resize()).observe(el);
+    raceChart.on("datazoom", () => endLabels());
+  }
+  const option = raceChartOption();
+  // lastX and player ride along on the series for endLabels(), echarts ignores them
+  raceSeriesInfo = option.series.filter((sr) => sr.player).map((sr) => ({ name: sr.name, lastX: sr.lastX, player: sr.player, line: sr.line }));
+  raceChart.setOption(option, true);
+  endLabels();
+  document.getElementById("race-full").hidden = option.dataZoom == null;
+}
+
+let raceSeriesInfo = [];
+
+// what a line's end says: their current rating, or in the gain view what they've gained
+function endText(player, line) {
+  if (raceOptions.view !== "gain") return `${player.name} ${player.journey.now?.rating ?? ""}`;
+  const gained = Math.round(line.at(-1)?.y ?? 0);
+  return `${player.name} ${gained >= 0 ? "+" : ""}${gained}`;
+}
+
+// end labels follow the zoom: the current rating when the line's real end is on screen,
+// just the name and an arrow when it carries on past the edge (the line at the edge isn't
+// at their current rating, so printing it there would mislead)
+function endLabels() {
+  const [, visibleEnd] = raceChart.getModel().getComponent("xAxis", 0).axis.scale.getExtent();
+  raceChart.setOption({
+    series: raceSeriesInfo.map((info) => ({
+      name: info.name,
+      endLabel: {
+        formatter: info.lastX <= visibleEnd ? endText(info.player, info.line) : `${info.player.name} →`,
+      },
+    })),
+  });
+}
+
+function raceChartOption() {
+  const { pair, primary } = current;
+  const { timeClass, journeys } = current.race;
+  const { x, view, smoothed, counted, milestone } = raceOptions;
+  const tc = timeClass[0].toUpperCase() + timeClass.slice(1);
+  const youIndex = pair.indexOf(primary);
+  const players = pair.map((name, i) => {
+    const isPrimary = youIndex >= 0 ? i === youIndex : i === 0;
+    return { name, journey: journeys[i], color: isPrimary ? RACE_COLORS.primary : RACE_COLORS.other, dashed: !isPrimary };
+  });
+  const lines = players.map((pl) => chartSeries(pl.journey, { x, counted, view, smoothed }));
+  // the x of a daily point, the same way chartSeries works it out (gain view starts at game 60)
+  const xOf = (i, p) => {
+    const line = lines[i];
+    if (!line.length) return null;
+    const first = line[0];
+    const offset = (x === "games" ? gamesBy(first.p, counted) : first.p.day) - first.x;
+    return (x === "games" ? gamesBy(p, counted) : p.day) - offset;
+  };
+  const point = (pt) => ({ value: [pt.x, pt.y], p: pt.p });
+  const series = [];
+
+  players.forEach((pl, i) => {
+    const line = lines[i];
+    if (!line.length) return;
+    // placement games: the first 60 rated games, dashed and lighter. the gain view starts after them
+    const cut = line.findIndex((pt) => pt.p.ratedGames >= PLACEMENT_GAMES);
+    const placement = view === "gain" ? [] : line.slice(0, cut === -1 ? line.length : cut + 1);
+    const settled = view === "gain" ? line : cut === -1 ? [] : line.slice(cut);
+    if (placement.length) {
+      series.push({
+        name: `${pl.name} placement`,
+        type: "line",
+        data: placement.map(point),
+        showSymbol: false,
+        lineStyle: { color: pl.color, width: 1.5, type: "dashed", opacity: 0.35 },
+        itemStyle: { color: pl.color },
+        // said once, on the first player's
+        endLabel: i === 0 ? { show: true, formatter: "Placement games", color: "#999", fontSize: 10 } : undefined,
+      });
+    }
+
+    const markPoints = [];
+    const markLines = [];
+    const markAreas = [];
+    // the crossing, for the highlighted milestone only: "2000 · day 410"
+    const reached = view === "rating" ? pl.journey.milestones[milestone]?.reached : null;
+    if (reached) {
+      const at = xOf(i, reached);
+      markPoints.push({
+        coord: [at, milestone],
+        symbol: "circle",
+        symbolSize: 7,
+        label: { show: true, position: i === 0 ? "top" : "bottom", fontSize: 10, color: pl.color,
+          formatter: `${milestone} · ${x === "games" ? `game ${at.toLocaleString("en-US")}` : `day ${at.toLocaleString("en-US")}`}` },
+      });
+    }
+    // breaks of 30+ days: shaded in the player's color (on a games axis a break has no width,
+    // so a line). words only on their 3 longest 90+ day ones, or a player with 14 breaks
+    // buries the chart
+    const labeled = new Set(
+      [...pl.journey.breaks].filter((b) => b.days >= RACE_CONFIG.raceBreakDays).sort((p, q) => q.days - p.days).slice(0, 3)
+    );
+    for (const b of pl.journey.breaks) {
+      const before = [...pl.journey.daily].reverse().find((p) => p.day <= b.fromDay);
+      if (!before) continue;
+      const from = xOf(i, before);
+      const label = {
+        show: labeled.has(b),
+        formatter: `${b.days}-day break`,
+        fontSize: 9,
+        color: pl.color,
+        position: i === 0 ? "insideTop" : "insideBottom",
+      };
+      if (x === "games") markLines.push({ xAxis: from, label, lineStyle: { color: "#bbb", type: "dotted" } });
+      // from the last game before the break to the first one after it
+      else markAreas.push([{ xAxis: from, label }, { xAxis: from + (b.toDay - before.day) }]);
+    }
+
+    series.push({
+      name: pl.name,
+      type: "line",
+      data: (settled.length ? settled : placement.slice(-1)).map(point),
+      showSymbol: false,
+      sampling: "lttb",
+      lineStyle: { color: pl.color, width: 2, type: pl.dashed ? "dashed" : "solid" },
+      itemStyle: { color: pl.color },
+      // the end of the line says whose it is, no legend to look away to
+      // the end says whose line it is. see endLabels() for the zoomed-in case
+      endLabel: { show: true, color: pl.color, fontWeight: "bold", formatter: endText(pl, line) },
+      lastX: (settled.length ? settled : placement.slice(-1)).at(-1)?.x,
+      player: pl,
+      line,
+      // two labels landing on the same spot: hide the later one instead of overprinting
+      labelLayout: { hideOverlap: true },
+      markPoint: markPoints.length ? { data: markPoints, symbolKeepAspect: true } : undefined,
+      markLine: markLines.length ? { symbol: "none", silent: true, data: markLines } : undefined,
+      markArea: markAreas.length ? { silent: true, itemStyle: { color: pl.color, opacity: 0.06 }, data: markAreas } : undefined,
+    });
+
+    // the projection: a dotted continuation, labeled as an estimate (days and rating only)
+    const proj = view === "rating" && x === "days" && smoothed ? projectionOf(pl.journey) : null;
+    if (proj?.daysToNext) {
+      const start = pl.journey.currentDay;
+      const end = start + Math.min(proj.daysToNext, 365);
+      const pts = [];
+      for (let d = start; d <= end; d += Math.max(1, Math.round((end - start) / 30))) pts.push([d, projectAt(proj, d)]);
+      series.push({
+        name: `${pl.name} estimate`,
+        type: "line",
+        data: pts,
+        showSymbol: false,
+        silent: true,
+        lineStyle: { color: pl.color, width: 1.5, type: "dotted", opacity: 0.6 },
+        endLabel: { show: true, formatter: "Estimate", color: "#999", fontSize: 10 },
+        tooltip: { show: false },
+      });
+    }
+  });
+
+  // lead changes: "<username> takes the lead". only once both are past placement, where
+  // ratings jump around too much for the lead to mean anything
+  const settledOnly = lines.map((line) => line.filter((pt) => view === "gain" || pt.p.ratedGames >= PLACEMENT_GAMES));
+  if (settledOnly[0].length && settledOnly[1].length) {
+    for (const change of leadChanges(settledOnly[0], settledOnly[1])) {
+      const pl = players[change.leader === "a" ? 0 : 1];
+      const target = series.find((sr) => sr.name === pl.name);
+      target.markPoint ??= { data: [] };
+      target.markPoint.data.push({
+        coord: [change.x, change.y],
+        symbol: "pin",
+        symbolSize: 18,
+        itemStyle: { color: pl.color },
+        label: { show: true, position: "top", fontSize: 9, color: pl.color, formatter: `${pl.name} takes the lead`, offset: [0, -8] },
+      });
+    }
+  }
+
+  // the highlighted milestone as a faint level, so the crossings have something to cross
+  if (view === "rating" && milestone) {
+    const first = series.find((sr) => sr.name === players[0].name);
+    first.markLine ??= { symbol: "none", silent: true, data: [] };
+    first.markLine.data.push({ yAxis: milestone, lineStyle: { color: "#ccc", type: "dashed" }, label: { show: false } });
+  }
+
+  // the gain view starts at rated game 60 for both, so there's no long career to zoom past
+  const zoomEnd = view === "gain" ? null : defaultZoomEnd(...players.map((pl) => ({ name: pl.name, journey: pl.journey })), { x, counted });
+  const gamesName = { rated: "Rated games played", unrated: "Unrated games played", both: "Games played" }[counted];
+  return {
+    animation: false,
+    grid: { left: 56, right: 150, top: 24, bottom: 64 },
+    xAxis: {
+      type: "value",
+      name: view === "gain"
+        ? (x === "games" ? `${gamesName} since rated game 60` : "Days since rated game 60")
+        : (x === "games" ? gamesName : `Days since first ${timeClass} game`),
+      nameLocation: "middle",
+      nameGap: 28,
+      splitLine: { show: false },
+      axisLabel: { formatter: (v) => v.toLocaleString("en-US") },
+    },
+    yAxis: {
+      type: "value",
+      name: view === "gain" ? "Rating gained since start" : `${tc} rating`,
+      scale: true,
+      // room above the top line for its labels
+      max: (v) => Math.ceil((v.max + 60) / 100) * 100,
+      // faint horizontal gridlines only
+      splitLine: { lineStyle: { color: "#f0f0f0" } },
+    },
+    tooltip: {
+      trigger: "axis",
+      // stays inside the chart instead of running off the popup's edge
+      confine: true,
+      // "Day 214 · Sep 12, 2025 · 1,742 · game 1,318", one line per player
+      formatter: (params) =>
+        params
+          .filter((pr) => pr.data?.p && !pr.seriesName.endsWith(" estimate"))
+          .map((pr) => {
+            const p = pr.data.p;
+            const y = Math.round(pr.data.value[1]);
+            const shown = view === "gain" ? `${y >= 0 ? "+" : ""}${y}` : y.toLocaleString("en-US");
+            return `<b>${pr.seriesName.replace(/ placement$/, "")}</b>: Day ${p.day.toLocaleString("en-US")} · ${fmtDate(p.t)} · ${shown} · game ${gamesBy(p, counted).toLocaleString("en-US")}`;
+          })
+          .join("<br>"),
+    },
+    dataZoom: zoomEnd == null ? undefined : [
+      { type: "inside", filterMode: "none", startValue: 0, endValue: zoomEnd },
+      { type: "slider", filterMode: "none", startValue: 0, endValue: zoomEnd, height: 16, bottom: 6 },
+    ],
+    series,
+  };
+}
+
+document.getElementById("race-full").addEventListener("click", () => {
+  raceChart?.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
+});
+
 // --- views ---
 // one page, one <section> per view. always opens on overview, nothing remembered
 const VIEWS = ["overview", "race", "methodology"];
@@ -952,15 +1717,17 @@ function showView(name) {
   for (const button of document.querySelectorAll("#views button")) {
     button.setAttribute("aria-pressed", String(button.dataset.view === name));
   }
-  // no link to the page you're already on
-  document.getElementById("open-methodology").hidden = name === "methodology";
+  // no link to the page you're already on. the race view has it in its footer instead
+  document.getElementById("open-methodology").hidden = name === "methodology" || name === "race";
+  // the chart needs room. chrome caps popups at 800px wide
+  document.body.classList.toggle("wide", name === "race");
 }
 
 // one paragraph per METHODOLOGY entry in performance.js
 function renderMethodology() {
   const container = document.getElementById("methodology");
   container.innerHTML = "";
-  for (const text of Object.values(METHODOLOGY)) {
+  for (const text of [...Object.values(METHODOLOGY), ...Object.values(RACE_METHODOLOGY)]) {
     const p = document.createElement("p");
     p.textContent = text;
     container.appendChild(p);
@@ -968,8 +1735,15 @@ function renderMethodology() {
 }
 
 for (const button of document.querySelectorAll("#views button")) {
-  button.addEventListener("click", () => showView(button.dataset.view));
+  button.addEventListener("click", () => {
+    showView(button.dataset.view);
+    if (button.dataset.view === "race") openRace();
+  });
 }
+document.getElementById("open-race").addEventListener("click", () => {
+  showView("race");
+  openRace();
+});
 document.getElementById("open-methodology").addEventListener("click", () => showView("methodology"));
 
 document.addEventListener("DOMContentLoaded", () => {
