@@ -1,4 +1,4 @@
-# Performance
+# Chess Compare
 
 A Chrome extension that tells you how good you (and the person you're playing) actually are on chess.com right now, not just what the rating says.
 
