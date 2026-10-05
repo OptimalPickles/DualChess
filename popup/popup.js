@@ -190,15 +190,9 @@ function levelModel(name, username, data, missing, p, now) {
   };
 }
 
-// the "More details" column for one player: the last 90 days, and stability
-async function formColumn(username, timeClass, perf, now) {
-  const all = await fetchPlayerGames(username, () => true, { cacheOnly: true });
-  return { ...recentForm(all ? filterGames(all, { timeClass, rated: "all" }) : [], now), stability: stabilityShort(perf?.stability) };
-}
-
 // everything the popup shows, as words and numbers, from storage alone
 async function buildView() {
-  const { entries, pair, mode, primary } = current;
+  const { entries, pair, primary } = current;
   const opt = { cacheOnly: true };
   const settings = { ...(await loadSettings()), ...POPUP_RANGE };
   const now = Date.now();
@@ -226,45 +220,21 @@ async function buildView() {
   };
   if (!pair) return view;
 
-  // the two columns, left to right. profile and playing: you on the left
+  // left and right. profile and playing: you on the left
   const perfs = await Promise.all(pair.map((u, i) => perfOf(u, pair[1 - i])));
   view.complete = view.complete && perfs.every((p, i) => p || missing[pair[i]] || !timeClass);
   const names = pair.map((u) => (u === primary ? "You" : u));
-  view.columns = pair.map((u, i) => levelModel(names[i], u, stats[u], missing[u], perfs[i], now));
+  // a player whose ratings didn't load gets one line instead of empty cells
+  view.problems = pair
+    .map((u, i) => levelModel(names[i], u, stats[u], missing[u], perfs[i], now).problem)
+    .filter((x) => x && !x.startsWith("No recent"));
 
-  // the head-to-head in this time class only, rated and unrated
+  // the head-to-head in this time class only, rated and unrated, and the gap it implies
   const h2hAll = await fetchHeadToHead(pair[0], pair[1], () => {}, opt);
   const h2h = filterHeadToHead(h2hAll, { timeClass, rated: POPUP_RANGE.rated }, now);
-  const matchup = h2h && isRivalry(h2h.games) ? matchupOf(perfs, h2h, now) : null;
-  // the matchup's own expectation when there is one, else by current level
-  const expected = matchup?.blended
-    ? expectedScore(matchup.blended.me, matchup.blended.opp)
-    : matchupPrediction(pair, perfs)?.expected;
-  view.prediction = expected == null ? null : { ...predictionParts(names[0], expected, h2h, !current.h2hSynced), share: expected };
-  view.compareToday = mode === "playing" ? todayParts(perfs[0]?.session, now) : null;
-
-  // folded away: a table of the last 90 days and stability, then the pair's own lines
-  const cols = timeClass ? await Promise.all(pair.map((u, i) => formColumn(u, timeClass, perfs[i], now))) : [];
-  view.more = {
-    names,
-    rows: cols.length === 2
-      ? [
-          ["Games, last 90 days", "games"],
-          ["Win · draw · loss", "wdl"],
-          ["Peak, last 90 days", "peak"],
-          ["Average opponent", "avgOpp"],
-          ["Stability", "stability"],
-        ].map(([label, key]) => [label, cols[0][key], cols[1][key]])
-      : [],
-    lines: [
-      ...(matchup?.blended ? [matchupLine(pair[0], pair[1], primary, matchup.blended)] : []),
-      ...(h2h ? [last30Text(h2h.last30)] : []),
-    ],
-    recent: (h2h?.games ?? []).slice(0, RECENT_GAMES_SHOWN).map((g) => ({
-      text: `${g.score === 1 ? "W" : g.score === 0 ? "L" : "D"} · ${g.timeClass} · ${fmtDate(g.t)}`,
-      url: gameUrl(g),
-    })),
-  };
+  const gap = h2h?.games.length ? matchupGap(h2h.games, now) : null;
+  view.compare = compareSummary({ names, perfs, h2h, gap });
+  view.names = names;
   return view;
 }
 
@@ -304,6 +274,13 @@ function line(key, bold, rest, caveat) {
   return li;
 }
 
+// a line that's left out (and takes no space) when there's nothing to say
+function setLine(id, text) {
+  const node = document.getElementById(id);
+  node.textContent = text ?? "";
+  node.hidden = !text;
+}
+
 function renderLines(id, lines) {
   const list = document.getElementById(id);
   list.innerHTML = "";
@@ -311,32 +288,33 @@ function renderLines(id, lines) {
   list.hidden = !lines.length;
 }
 
-// the details table: a column per player, in their colors, then the pair's own lines
+// one card: name, "Official" and the big official rating, then "Perf 2009 ● Medium"
+function renderCard(container, name, official, current) {
+  container.innerHTML = "";
+  container.append(el("div", name, "nm"), el("div", "Official", "lbl"), el("div", official == null ? "—" : String(official), "big"));
+  const perf = el("div", null, "perf");
+  perf.append(el("span", "Perf"), " ", el("b", current ? String(current.perf) : "—"));
+  if (current) perf.append(" ", el("span", current.label, `conf conf--${{ High: "high", Medium: "med", Low: "low" }[current.label]}`));
+  container.appendChild(perf);
+}
+
+// parts where every odd one is bold: ["You play at ", "1790", " vs ", "1654", " (±100)"]
+function fillParts(node, parts) {
+  node.innerHTML = "";
+  parts.forEach((text, i) => node.append(i % 2 ? el("b", text) : text));
+}
+
+// More details, as sentences under small headings
 function renderMore(more) {
-  const table = document.getElementById("more-table");
-  table.innerHTML = "";
-  const head = el("tr");
-  head.append(el("th"), el("th", more.names[0], "you"), el("th", more.names[1], "opp"));
-  table.appendChild(el("thead")).appendChild(head);
-  const body = table.appendChild(el("tbody"));
-  for (const [label, a, b] of more.rows) {
-    const tr = el("tr");
-    tr.append(el("th", label), el("td", a), el("td", b));
-    body.appendChild(tr);
-  }
-  const extra = document.getElementById("more-extra");
-  extra.innerHTML = "";
-  for (const text of more.lines) extra.appendChild(el("p", text));
-  if (more.recent.length) {
-    const list = el("ul", null, "recent");
-    for (const g of more.recent) {
-      const a = el("a", g.text);
-      a.href = g.url;
-      a.target = "_blank";
-      list.appendChild(el("li")).appendChild(a);
-    }
-    extra.appendChild(list);
-  }
+  const body = document.getElementById("more-body");
+  body.innerHTML = "";
+  const group = (title, lines) => {
+    body.appendChild(el("p", title, "more-title"));
+    for (const text of lines) body.appendChild(el("p", text));
+  };
+  group("Last 90 days, all opponents", more.form);
+  group("Consistency", more.consistency);
+  if (more.against) group("Against each other", [more.against]);
 }
 
 // final = sync has run, so missing numbers are real failures, not "still loading".
@@ -369,21 +347,40 @@ async function render({ final = false } = {}) {
   document.getElementById("open-stats").hidden = !view.timeClass;
 
   // Compare
-  if (view.columns) {
-    view.columns.forEach((m, i) => renderLevel(document.getElementById(`col-${i}`), m));
-    // a long username doesn't fit half the width: one row per player instead
-    document.getElementById("players").classList.toggle("players--stacked", view.columns.some((m) => m.name.length > 13));
-    const pred = view.prediction;
-    document.getElementById("prediction").hidden = !pred;
-    if (pred) {
-      const text = document.getElementById("prediction-text");
-      text.innerHTML = "";
-      text.append(pred.lead, el("strong", pred.pct), pred.tail);
-      document.getElementById("bar-you").style.width = `${Math.round(pred.share * 100)}%`;
+  if (view.compare) {
+    const c = view.compare;
+    view.names.forEach((name, i) => renderCard(document.getElementById(`card-${i}`), name, c.official[i], c.current[i]));
+    setLine("cmp-problem", view.problems.join(" "));
+    // one span, so the line centers as a whole; the numbers in it are bold
+    const lead = document.getElementById("lead");
+    lead.innerHTML = "";
+    const leadLine = el("span");
+    fillParts(leadLine, c.lead);
+    leadLine.querySelectorAll("b").forEach((b, i) => (b.className = c.leadSides[i]));
+    lead.appendChild(leadLine);
+    lead.hidden = !c.lead.join("");
+    document.getElementById("against").hidden = !c.against;
+    if (c.against) {
+      document.getElementById("against-title").textContent = c.against.title;
+      const levels = document.getElementById("against-levels");
+      levels.hidden = !c.against.levels;
+      if (c.against.levels) fillParts(levels, c.against.levels);
+      fillParts(document.getElementById("against-scored"), c.against.scored);
     }
-    const today = view.compareToday;
-    renderLines("compare-lines", today ? [line("Today:", today.wdl, today.rest)] : []);
-    renderMore(view.more);
+    const ch = c.chance;
+    document.getElementById("win").hidden = !ch;
+    if (ch) {
+      document.getElementById("wbar-y").style.flex = String(ch.win);
+      document.getElementById("wbar-d").style.flex = String(ch.draw);
+      document.getElementById("wbar-o").style.flex = String(ch.loss);
+      document.getElementById("win-y-name").textContent = view.names[0];
+      document.getElementById("win-o-name").textContent = view.names[1];
+      document.getElementById("win-y").textContent = `${ch.win}%`;
+      document.getElementById("win-d").textContent = `${ch.draw}%`;
+      document.getElementById("win-o").textContent = `${ch.loss}%`;
+    }
+    document.getElementById("based-on").textContent = c.basedOn;
+    renderMore(c.more);
     document.getElementById("open-compare").hidden = !view.timeClass;
   }
 

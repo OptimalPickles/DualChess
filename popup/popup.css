@@ -209,3 +209,36 @@ button.link:focus-visible, .foot button:focus-visible { outline: 2px solid var(-
 /* under the details table: the matchup, the last 30 days, the last 5 games */
 .more-extra { display: grid; gap: 4px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
 .more-extra .recent { margin: 0; padding-left: 16px; }
+
+/* --- Compare, layout F (Claude Design "Layout variations v2") --- */
+.v2 .body { gap: 14px; }
+.lbl { font-size: 11.5px; color: var(--muted); }
+.perf { display: flex; align-items: baseline; gap: 6px; font-size: 13px; color: var(--muted); }
+.perf b { font-size: 15px; font-weight: 600; color: var(--ink); }
+.perf .conf { font-size: 12px; color: var(--muted); }
+.h2h { display: grid; gap: 3px; font-size: 13px; color: var(--muted); }
+.h2h h3 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.h2h b { font-weight: 600; color: var(--ink); }
+.win { display: grid; gap: 8px; padding: 12px 14px; border-radius: 10px; background: var(--sunken); }
+.win-title { font-size: 13.5px; font-weight: 600; }
+.win-legend { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.win-legend > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.win-legend b { font-weight: 650; color: var(--ink); }
+.win-legend .y b { color: var(--you-ink); } .win-legend .o b { color: var(--opp-ink); }
+.wbar { display: flex; gap: 2px; height: 8px; }
+.wbar span { border-radius: 2px; } .wbar .y { background: var(--you); } .wbar .d { background: var(--line-strong); } .wbar .o { background: var(--opp); }
+.win .note { font-size: 11.5px; color: var(--muted); }
+
+.lf .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lf .p { --c: var(--you); --ci: var(--you-ink); display: grid; gap: 6px; padding: 12px; border-radius: 10px; border: 1px solid var(--line-strong); box-shadow: inset 0 3px 0 var(--c); min-width: 0; }
+.lf .p.o { --c: var(--opp); --ci: var(--opp-ink); }
+.lf .nm { font-size: 12.5px; font-weight: 600; color: var(--ci); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lf .big { font-size: 40px; font-weight: 650; letter-spacing: -.025em; line-height: 1; }
+.lf .perf { padding-top: 6px; border-top: 1px solid var(--line); flex-wrap: wrap; row-gap: 0; }
+.lf .lead { display: flex; justify-content: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.lf .lead b { color: var(--you-ink); font-weight: 600; }
+.lf .lead b.o { color: var(--opp-ink); }
+
+/* more details, as sentences under small headings */
+.more-body { display: grid; gap: 2px; margin-top: 6px; font-size: 12.5px; }
+.more-title { margin-top: 6px; font-weight: 600; }

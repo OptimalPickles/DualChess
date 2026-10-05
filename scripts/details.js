@@ -117,6 +117,8 @@ async function loadPerformance(username, data, now, settings, timeClass, opponen
 
   // most recent game in this time class, rated or not. not /stats last.date
   const lastActivity = filterGames(all, { timeClass, rated: "all" })[0]?.t ?? null;
+  // the newest rated game: breaks a confidence tie when picking the matchup's anchor
+  const lastRatedT = filterGames(all, { timeClass, rated: "rated" })[0]?.t ?? null;
 
   let session = null;
   const sessionGames = applyRange(filtered, SESSION_RANGE, now);
@@ -147,6 +149,9 @@ async function loadPerformance(username, data, now, settings, timeClass, opponen
     conf: confidence(games, perf, now, timeClass, stab.stability),
     stability: stab,
     lastEndTime: lastActivity,
+    lastRatedT,
+    // last 90 days in this time class, rated and unrated, every opponent
+    form: form90(filterGames(all, { timeClass, rated: "all" }), now),
     official: data?.stats?.[`chess_${timeClass}`]?.last?.rating ?? null,
     session,
     field: opponent ? fieldRating(all, opts, range, now, timeClass, opponent) : null,
@@ -280,67 +285,184 @@ function shadowLine(w) {
   return { text: `Shadow ${level}${rest}`, level, rest, flags: w.flags };
 }
 
-// "You're expected to score 69% · h2h 506–187 (73%)", from the left player's side.
-// h2h: the filtered head-to-head, null while it's still loading (pending) or unknown
-// parts: { lead: "You're expected to score ", pct: "69%", tail: " · h2h 506–187 (73%)" }
-function predictionParts(name, expected, h2h, pending) {
-  const who = name === "You" ? "You're" : `${name} is`;
-  let tail = "";
-  if (h2h?.total) {
-    const a = h2h.aWins + h2h.draws / 2;
-    tail = ` · h2h ${fmtScore(a)}–${fmtScore(h2h.total - a)} (${pct(a / h2h.total)})`;
-  } else if (h2h) {
-    tail = " · no h2h games yet";
-  } else if (pending) {
-    tail = " · h2h loading…";
-  }
-  return { lead: `${who} expected to score `, pct: pct(expected), tail };
-}
+// --- the Compare view ---
 
-function predictionText(name, expected, h2h, pending) {
-  const p = predictionParts(name, expected, h2h, pending);
-  return p.lead + p.pct + p.tail;
-}
-
-// the "More details" table, one column per player: games, win/draw/loss %, peak and average
-// opponent over the last 90 days. games: one time class, rated and unrated, any order
+const AGAINST_MIN_GAMES = 5; // fewer games together than this: no "Against each other" section
+const BLEND_GAMES = 30; // the head-to-head counts for half the gap at 30 games together
 const FORM_DAYS = 90;
-function recentForm(games, now) {
+const CONF_RANK = { Low: 0, Medium: 1, High: 2 };
+
+// last 90 days, all opponents, as numbers. games: one time class, rated and unrated, any order.
+// score counts a draw as half a point. peak = highest rating after a rated game
+function form90(games, now) {
   const since = now / 1000 - FORM_DAYS * 86400;
   const recent = games.filter((g) => g.t >= since);
-  if (!recent.length) return { games: "0", wdl: "—", peak: "—", avgOpp: "—" };
   const t = wdl(recent);
-  const share = (n) => Math.round((n / recent.length) * 100);
   const rated = recent.filter((g) => g.rated);
   const opps = recent.map((g) => g.oppPre ?? g.oppRating).filter((x) => x != null);
+  const n = recent.length;
   return {
-    games: fmtCount(recent.length),
-    wdl: `${share(t.w)} · ${share(t.d)} · ${share(t.l)}%`,
-    // ratings after each rated game: the highest one reached
-    peak: rated.length ? String(Math.max(...rated.map((g) => g.rating))) : "—",
-    avgOpp: opps.length ? String(Math.round(opps.reduce((a, b) => a + b, 0) / opps.length)) : "—",
+    games: n,
+    score: n ? (t.w + t.d / 2) / n : null,
+    drawRate: n ? t.d / n : null,
+    avgOpp: opps.length ? opps.reduce((a, b) => a + b, 0) / opps.length : null,
+    peak: rated.length ? Math.max(...rated.map((g) => g.rating)) : null,
   };
 }
 
-// a table cell's worth of stability: "Stable (1.4)", "Shifting (2.8)"
-function stabilityShort(st) {
-  if (!st || st.reason) return "—";
-  const ratio = st.ratio < 1 ? st.ratio.toFixed(2) : st.ratio.toFixed(1);
-  return `${st.stability === 1 ? "Stable" : "Shifting"} (${ratio})`;
+// the gap the win chance uses. under 5 games together: current performance only. after
+// that the head-to-head gap G counts more the more they've played: w = n / (n + 30)
+function blendedGap(n, G, currentGap) {
+  if (n < AGAINST_MIN_GAMES || G == null) return currentGap;
+  const w = n / (n + BLEND_GAMES);
+  return w * G + (1 - w) * currentGap;
 }
 
-// "When you play each other: You 1917 vs legendary9000 1781 (±83)"
-function matchupLine(a, b, primary, blended) {
-  const say = (n) => (n === primary ? "You" : n);
-  const when = a === primary || b === primary ? "When you play each other" : `When ${a} and ${b} play each other`;
-  return `${when}: ${say(a)} ${Math.round(blended.me)} vs ${say(b)} ${Math.round(blended.opp)} (±${Math.round(blended.error)})`;
+// expected score (a draw = half a point) split into win / draw / loss with the draw rate:
+// win = E - D/2, loss = 1 - E - D/2. whole percents, never below 0
+function winChance(expected, drawRate) {
+  const whole = (x) => Math.round(Math.max(0, x) * 100);
+  return { win: whole(expected - drawRate / 2), draw: whole(drawRate), loss: whole(1 - expected - drawRate / 2) };
 }
 
-// "Last 30 days: 5W 1D 2L (8 games, 5.5–2.5)", from the left player's side
-function last30Text(t) {
-  if (!t.total) return "Last 30 days: no games";
-  const a = t.aWins + t.draws / 2;
-  return `Last 30 days: ${fmtCount(t.aWins)}W ${fmtCount(t.draws)}D ${fmtCount(t.bWins)}L (${plural(t.total, "game")}, ${fmtScore(a)}–${fmtScore(t.total - a)})`;
+// whose performance the matchup hangs on: the one with higher confidence, from games NOT
+// against each other (field ratings). same confidence: the one with the more recent rated
+// game. a: { perf, conf, lastRatedT }. returns 0, 1, or null when neither has a performance
+function pickAnchor(a, b) {
+  const rank = (f) => (f?.perf != null ? CONF_RANK[f.conf?.label] ?? 0 : -1);
+  const [ra, rb] = [rank(a), rank(b)];
+  if (ra !== rb) return ra > rb ? 0 : 1;
+  if (ra < 0) return null;
+  return (a.lastRatedT ?? 0) >= (b.lastRatedT ?? 0) ? 0 : 1;
+}
+
+// both players' levels against each other: the anchor at its field rating, the other at
+// anchor -/+ G. error: the anchor's and the gap's together
+function matchupLevels(fields, gap) {
+  const i = pickAnchor(fields[0], fields[1]);
+  if (i == null || !gap) return null;
+  const anchor = fields[i].perf;
+  return {
+    anchor: i,
+    levels: i === 0 ? [anchor, anchor - gap.G] : [anchor + gap.G, anchor],
+    error: Math.sqrt(fields[i].error ** 2 + gap.error ** 2),
+  };
+}
+
+// who's ahead and by how much: { who: "You", by: 413 }, { who: null } for level, null if
+// one side is missing
+function leadOf(names, a, b) {
+  if (a == null || b == null) return null;
+  const d = Math.round(a - b);
+  if (!d) return { who: null, by: 0 };
+  return d > 0 ? { who: names[0], by: d } : { who: names[1], by: -d };
+}
+
+// "You lead by +413 official · +293 performance" as parts: every odd one is bold.
+// a different leader on performance gets named: "You lead by +40 official · x +12 performance"
+function leadParts(names, official, perf) {
+  const leads = (who) => `${who} ${who === "You" ? "lead" : "leads"} by `;
+  // plain text joins the plain text before it, so bold parts stay at odd indexes
+  const out = [""];
+  const plain = (text) => (out[out.length - 1] += text);
+  const bold = (text) => out.push(text, "");
+  if (official?.who) {
+    plain(leads(official.who));
+    bold(`+${official.by}`);
+    plain(" official");
+  } else if (official) plain("Level on official");
+  if (perf) {
+    if (official) plain(" · ");
+    if (!perf.who) plain(official ? "level on performance" : "Level on performance");
+    else {
+      if (official?.who !== perf.who) plain(official ? `${perf.who} ` : leads(perf.who));
+      bold(`+${perf.by}`);
+      plain(" performance");
+    }
+  }
+  return out;
+}
+
+// "Your results swing more than luck explains", "legendary9000 is steady"
+function consistencyText(name, st) {
+  const you = name === "You";
+  if (!st || st.reason) return `Not enough sessions to tell for ${you ? "you" : name}`;
+  if (st.stability === 1) return you ? "You're steady" : `${name} is steady`;
+  return `${you ? "Your" : `${name}'s`} results swing more than luck explains`;
+}
+
+// everything the Compare view says, from the left player's side. pure, so it's tested as is.
+//   names: ["You", "legendary9000"] (or two usernames when spectating)
+//   perfs: [{ perf, official, conf, stability, lastRatedT, field, form }] (loadPerformance)
+//   h2h: the filtered head-to-head ({ total, aWins, draws, bWins, last30 }), or null
+//   gap: matchupGap() of the head-to-head games, or null
+function compareSummary({ names, perfs, h2h, gap }) {
+  const [a, b] = perfs;
+  const you = names[0] === "You";
+  const n = h2h?.total ?? 0;
+
+  // the current-performance gap, or official when there's no performance to go on
+  const levelOf = (p) => p?.perf ?? p?.official ?? null;
+  const currentGap = levelOf(a) != null && levelOf(b) != null ? levelOf(a) - levelOf(b) : null;
+  const together = n >= AGAINST_MIN_GAMES && gap;
+  const g = currentGap == null ? (together ? gap.G : null) : blendedGap(together ? n : 0, gap?.G, currentGap);
+  const expected = g == null ? null : 1 / (1 + Math.pow(10, -g / 400));
+
+  // draw rate: both players' last 90 days averaged, or whoever has games
+  const rates = perfs.map((p) => p?.form?.drawRate).filter((x) => x != null);
+  const drawRate = rates.length ? rates.reduce((x, y) => x + y, 0) / rates.length : 0;
+  const chance = expected == null ? null : winChance(expected, drawRate);
+
+  let against = null;
+  if (n >= AGAINST_MIN_GAMES) {
+    const m = gap ? matchupLevels([{ ...a?.field, lastRatedT: a?.lastRatedT }, { ...b?.field, lastRatedT: b?.lastRatedT }], gap) : null;
+    const r = Math.round;
+    const scored = (h2h.aWins + h2h.draws / 2) / n;
+    // parts: every odd one is bold
+    against = {
+      title: `Against each other · ${plural(n, "game")}`,
+      levels: m && [`${you ? "You play" : `${names[0]} plays`} at `, String(r(m.levels[0])), " vs ", String(r(m.levels[1])), ` (±${r(m.error)})`],
+      scored: [`${you ? "You've" : `${names[0]} has`} scored `, pct(scored), expected == null ? "" : ` · expected ${pct(expected)}`],
+    };
+  }
+
+  // more details, as sentences
+  const played = (name, f, first) => {
+    if (!f?.games) return `${name} played no games`;
+    return `${name} played ${plural(f.games, "game")} and scored ${pct(f.score)}${first ? " of points" : ""}`;
+  };
+  const opp = (x) => (x == null ? "—" : String(Math.round(x)));
+  const last30 = h2h?.last30;
+  const forWho = you ? "you" : names[0];
+  let last30Line = null;
+  if (n >= 1) {
+    const pts = last30?.total ? last30.aWins + last30.draws / 2 : 0;
+    last30Line = last30?.total
+      ? `Last 30 days: ${fmtScore(pts)}–${fmtScore(last30.total - pts)} for ${forWho} (${plural(last30.total, "game")})`
+      : "Last 30 days: no games";
+  }
+
+  const leads = [leadOf(names, a?.official, b?.official), leadOf(names, a?.perf, b?.perf)];
+  return {
+    official: [a?.official ?? null, b?.official ?? null],
+    current: perfs.map((p) => (p?.perf == null ? null : { perf: p.perf, label: p.conf?.label ?? "Low" })),
+    lead: leadParts(names, ...leads),
+    // the bold numbers in the lead line, in the leader's color: "y" (left) or "o" (right)
+    leadSides: leads.filter((l) => l?.who).map((l) => (l.who === names[0] ? "y" : "o")),
+    against,
+    chance,
+    win: chance && `Win chance: ${names[0]} ${chance.win}% · draw ${chance.draw}% · ${names[1]} ${chance.loss}%`,
+    basedOn: n >= AGAINST_MIN_GAMES ? `Based on current performance and ${plural(n, "game")} together` : "Based on current performance",
+    more: {
+      form: [
+        played(names[0], a?.form, true),
+        played(names[1], b?.form, false),
+        `Average opponent: ${opp(a?.form?.avgOpp)} for ${forWho}, ${opp(b?.form?.avgOpp)} for ${you ? "them" : names[1]}`,
+      ],
+      consistency: names.map((name, i) => consistencyText(name, perfs[i]?.stability)),
+      against: last30Line,
+    },
+  };
 }
 
 // RACE_CONFIG lives in race.js. in the pages it's a global, in node it's required
@@ -350,8 +472,8 @@ if (typeof RACE_CONFIG === "undefined" && typeof require !== "undefined") {
 
 if (typeof module !== "undefined") {
   module.exports = {
-    currentLevel, officialText, inactiveText, todayText, todayParts, shadowLine, predictionText, predictionParts,
-    matchupLine, last30Text, recentForm, stabilityShort,
-    signedMinus, stabilityText, parseRange, rangeLabel, timeAgo,
+    currentLevel, officialText, inactiveText, todayText, todayParts, shadowLine,
+    form90, blendedGap, winChance, pickAnchor, matchupLevels, leadOf, leadParts, consistencyText, compareSummary,
+    signedMinus, stabilityText, parseRange, rangeLabel, timeAgo, fieldRating,
   };
 }

@@ -45,40 +45,110 @@ test("shadow line from the 90-day window", () => {
   assert.equal(d.shadowLine(null), null);
 });
 
-test("prediction: you or a username, h2h score and share", () => {
-  const h2h = { total: 693, aWins: 491, draws: 30, bWins: 172 };
-  assert.equal(d.predictionText("You", 0.69, h2h), "You're expected to score 69% · h2h 506–187 (73%)");
-  assert.equal(d.predictionText("hikaru", 0.55, { total: 0 }), "hikaru is expected to score 55% · no h2h games yet");
-  assert.equal(d.predictionText("You", 0.6, null, true), "You're expected to score 60% · h2h loading…");
-  assert.equal(d.predictionText("You", 0.6, null, false), "You're expected to score 60%");
-});
-
-test("matchup and last 30 days, one line each", () => {
-  assert.equal(d.matchupLine("me", "legendary9000", "me", { me: 1917.4, opp: 1781, error: 83 }), "When you play each other: You 1917 vs legendary9000 1781 (±83)");
-  assert.equal(d.matchupLine("a", "b", "me", { me: 1500, opp: 1400, error: 90 }), "When a and b play each other: a 1500 vs b 1400 (±90)");
-  assert.equal(d.last30Text({ total: 8, aWins: 5, draws: 1, bWins: 2 }), "Last 30 days: 5W 1D 2L (8 games, 5.5–2.5)");
-  assert.equal(d.last30Text({ total: 0 }), "Last 30 days: no games");
-});
-
-test("parts for bold bits: today's record, shadow number, prediction %", () => {
+test("parts for bold bits: today's record, shadow number", () => {
   const s = { wdl: { w: 4, d: 1, l: 1 }, endTime: secs(0, 1), diff: 70 };
   assert.deepEqual(d.todayParts(s, NOW), { wdl: "4W 1D 1L", rest: " · 70 above your usual" });
   const sh = d.shadowLine({ shadow: { now: 2165, change: 40 }, official: { now: 2100 }, flags: [] });
   assert.equal(sh.level + sh.rest, "2165 · +65 vs official · +40 in 90 days");
-  assert.deepEqual(d.predictionParts("You", 0.69, { total: 693, aWins: 491, draws: 30, bWins: 172 }), {
-    lead: "You're expected to score ", pct: "69%", tail: " · h2h 506–187 (73%)",
-  });
 });
 
-test("recent form: last 90 days only, percentages, peak from rated games, average opponent", () => {
-  const g = (daysAgo, score, rated, rating, oppPre) => ({ t: secs(daysAgo), score, rated, rating, oppPre });
-  const games = [g(1, 1, true, 2088, 2000), g(2, 0, false, 2050, 1950), g(3, 0.5, true, 2060, 1970), g(4, 1, false, 2100, 1980), g(120, 1, true, 2300, 2200)];
-  assert.deepEqual(d.recentForm(games, NOW), { games: "4", wdl: "50 · 25 · 25%", peak: "2088", avgOpp: "1975" });
-  assert.deepEqual(d.recentForm([], NOW), { games: "0", wdl: "—", peak: "—", avgOpp: "—" });
+// --- Compare view ---
+
+test("blend: under 5 games current performance only, then w = n / (n + 30)", () => {
+  assert.equal(d.blendedGap(0, 136, 267), 267);
+  assert.equal(d.blendedGap(4, 136, 267), 267);
+  assert.equal(d.blendedGap(10, 136, 267), 234.25); // w = 0.25
+  assert.ok(Math.abs(d.blendedGap(693, 136, 267) - 141) < 1, String(d.blendedGap(693, 136, 267)));
 });
 
-test("stability in a table cell", () => {
-  assert.equal(d.stabilityShort({ stability: 1, ratio: 1.4, sessions: 4 }), "Stable (1.4)");
-  assert.equal(d.stabilityShort({ stability: 0.5, ratio: 2.8 }), "Shifting (2.8)");
-  assert.equal(d.stabilityShort({ reason: "few" }), "—");
+test("win chance: E 69%, draws 4% -> 67 / 4 / 29, never below 0", () => {
+  assert.deepEqual(d.winChance(0.69, 0.04), { win: 67, draw: 4, loss: 29 });
+  assert.deepEqual(d.winChance(0.99, 0.1), { win: 94, draw: 10, loss: 0 });
 });
+
+test("anchor: higher confidence wins, a tie goes to the more recent rated game", () => {
+  const f = (label, lastRatedT, perf = 1800) => ({ perf, error: 80, conf: { label }, lastRatedT });
+  assert.equal(d.pickAnchor(f("Medium", 100), f("High", 50)), 1);
+  assert.equal(d.pickAnchor(f("High", 50), f("Low", 100)), 0);
+  assert.equal(d.pickAnchor(f("Medium", 100), f("Medium", 200)), 1);
+  assert.equal(d.pickAnchor(f("Medium", 300), f("Medium", 200)), 0);
+  assert.equal(d.pickAnchor(f("High", 1, null), f("Low", 2)), 1); // no performance: can't anchor
+  assert.equal(d.pickAnchor({ perf: null }, { perf: null }), null);
+  // the anchor's level is its field rating, the other is anchor -/+ G
+  const m = d.matchupLevels([f("High", 1, 2052), f("Medium", 2, 1654)], { G: 136, error: 30 });
+  assert.deepEqual(m.levels, [2052, 1916]);
+  assert.equal(Math.round(m.error), 85); // sqrt(80^2 + 30^2)
+  assert.deepEqual(d.matchupLevels([f("Low", 1, 2052), f("High", 2, 1654)], { G: 136, error: 30 }).levels, [1790, 1654]);
+});
+
+test("anchor uses performance without the games against each other (the field rating)", async () => {
+  // you crush this one opponent but are ordinary against everyone else: the field rating
+  // (and so the anchor) ignores the crushing
+  const p = require("./performance.js");
+  globalThis.applyRange = p.applyRange; globalThis.filterGames = p.filterGames;
+  globalThis.performanceRating = p.performanceRating; globalThis.ratingError = p.ratingError;
+  globalThis.confidence = p.confidence; globalThis.rateable = p.rateable;
+  globalThis.stability = p.stability; globalThis.sessionPerformances = p.sessionPerformances;
+  const g = (i, opponent, score) => ({ id: i, t: secs(0, i), timeClass: "bullet", rated: true, opponent, score, myPre: 2000, oppPre: 2000, rating: 2000 });
+  const all = [...Array.from({ length: 20 }, (_, i) => g(i, "rival", 1)), ...Array.from({ length: 20 }, (_, i) => g(20 + i, `o${i}`, i % 2))];
+  const field = d.fieldRating(all, { timeClass: "bullet", rated: "all" }, { type: "games", n: 20 }, NOW, "bullet", "rival");
+  assert.equal(field.count, 20);
+  assert.ok(Math.abs(field.perf - 2000) < 5, String(field.perf)); // 50% vs 2000s, the rival's games left out
+});
+
+test("score: 62% wins and 3% draws is 64% of points", () => {
+  const games = [...Array(62).fill(1), ...Array(3).fill(0.5), ...Array(35).fill(0)].map((score, i) => ({ t: secs(1, i / 60), score, rated: false, oppPre: 1800 }));
+  const f = d.form90(games, NOW);
+  assert.equal(f.games, 100);
+  const s = d.compareSummary({ names: ["You", "x"], perfs: [{ perf: 2000, form: f }, { perf: 1900, form: f }], h2h: null, gap: null });
+  assert.equal(s.more.form[0], "You played 100 games and scored 64% of points");
+  assert.equal(s.more.form[1], "x played 100 games and scored 64%");
+});
+
+test("4 games together: no 'Against each other', win chance from current performance only", () => {
+  const form = { games: 50, score: 0.5, drawRate: 0.04, avgOpp: 1800 };
+  const perfs = [{ perf: 2022, official: 2100, conf: { label: "Medium" }, form }, { perf: 1890, official: 1980, conf: { label: "High" }, form }];
+  const h2h = { total: 4, aWins: 3, draws: 0, bWins: 1, last30: { total: 2, aWins: 1, draws: 0, bWins: 1 } };
+  const s = d.compareSummary({ names: ["You", "opponent123"], perfs, h2h, gap: { G: 400, error: 200 } });
+  assert.equal(s.against, null);
+  assert.equal(s.basedOn, "Based on current performance");
+  assert.equal(s.lead.join(""), "You lead by +120 official · +132 performance");
+  assert.deepEqual(s.leadSides, ["y", "y"]);
+  // gap 132 -> E 68.2%: 66 / 4 / 30
+  assert.equal(s.win, "Win chance: You 66% · draw 4% · opponent123 30%");
+  assert.equal(s.more.against, "Last 30 days: 1–1 for you (2 games)");
+});
+
+test("lots of games together: the against section and a blended win chance", () => {
+  const form = (score, drawRate) => ({ games: 100, score, drawRate, avgOpp: 1800 });
+  const perfs = [
+    { perf: 2022, official: 2100, conf: { label: "Medium" }, lastRatedT: 5, field: { perf: 2052, error: 83, conf: { label: "Medium" } }, form: form(0.64, 0.03), stability: { stability: 0.5, ratio: 2.8 } },
+    { perf: 1755, official: 1699, conf: { label: "Medium" }, lastRatedT: 9, field: { perf: 1654, error: 80, conf: { label: "Medium" } }, form: form(0.42, 0.05), stability: { stability: 1, ratio: 1.4 } },
+  ];
+  const h2h = { total: 693, aWins: 491, draws: 30, bWins: 172, last30: { total: 8, aWins: 5, draws: 1, bWins: 2 } };
+  const s = d.compareSummary({ names: ["You", "legendary9000"], perfs, h2h, gap: { G: 136, error: 30 } });
+  assert.equal(s.against.title, "Against each other · 693 games");
+  // same confidence, legendary9000 played rated more recently: they anchor. 1654 + 136
+  assert.equal(s.against.levels.join(""), "You play at 1790 vs 1654 (±85)");
+  assert.deepEqual(s.against.levels.filter((_, i) => i % 2), ["1790", "1654"]); // the bold parts
+  // gap 141 -> E 69%
+  assert.equal(s.against.scored.join(""), "You've scored 73% · expected 69%");
+  assert.deepEqual(s.chance, { win: 67, draw: 4, loss: 29 });
+  assert.equal(s.win, "Win chance: You 67% · draw 4% · legendary9000 29%");
+  assert.equal(s.basedOn, "Based on current performance and 693 games together");
+  assert.deepEqual(s.more.consistency, ["Your results swing more than luck explains", "legendary9000 is steady"]);
+  assert.equal(s.more.against, "Last 30 days: 5.5–2.5 for you (8 games)");
+  assert.equal(s.more.form[2], "Average opponent: 1800 for you, 1800 for them");
+});
+
+test("lead line: one leader, two leaders, level", () => {
+  const n = ["You", "x"];
+  assert.equal(d.leadParts(n, d.leadOf(n, 2100, 1687), d.leadOf(n, 2009, 1716)).join(""), "You lead by +413 official · +293 performance");
+  assert.equal(d.leadParts(n, d.leadOf(n, 2100, 2060), d.leadOf(n, 1990, 2002)).join(""), "You lead by +40 official · x +12 performance");
+  assert.equal(d.leadParts(n, d.leadOf(n, 1900, 2000), d.leadOf(n, 1950, 2000)).join(""), "x leads by +100 official · +50 performance");
+  assert.equal(d.leadParts(n, d.leadOf(n, 2000, 2000), d.leadOf(n, 1900, 2000)).join(""), "Level on official · x +100 performance");
+  assert.equal(d.leadParts(n, d.leadOf(n, 2000, null), d.leadOf(n, 1990, 2002)).join(""), "x leads by +12 performance");
+  // odd parts are the bold numbers
+  assert.deepEqual(d.leadParts(n, d.leadOf(n, 2100, 1687), d.leadOf(n, 2009, 1716)).filter((_, i) => i % 2), ["+413", "+293"]);
+});
+

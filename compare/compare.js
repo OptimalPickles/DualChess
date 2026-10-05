@@ -106,6 +106,8 @@ function renderPerformance(container, p, now) {
   }
 
   line(stabilityText(p.stability), "perf-sub");
+  // the highest rating after a rated game in the last 90 days, every opponent
+  line(`Peak, last 90 days: ${p.form?.peak ?? "no rated games"}`, "perf-sub");
 
   if (p.session) {
     const s = p.session;

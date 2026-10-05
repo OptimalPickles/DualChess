@@ -3,7 +3,7 @@
         <meta charset="utf-8" />
         <link rel="stylesheet" href="popup.css" />
     </head>
-    <body>
+    <body class="v2">
         <!-- loading, "open a chess.com page", errors -->
         <p id="status" class="status">Loading…</p>
 
@@ -52,20 +52,34 @@
                     <button type="button" id="open-stats" class="link">Full stats ↗</button>
                 </div>
 
-                <div id="view-compare" class="view" hidden>
-                    <section id="players" class="players">
-                        <div id="col-0" class="player"></div>
-                        <div id="col-1" class="player player--opp"></div>
+                <div id="view-compare" class="view lf" hidden>
+                    <!-- one card per player: official big, current performance under it -->
+                    <section class="cards">
+                        <div id="card-0" class="p"></div>
+                        <div id="card-1" class="p o"></div>
                     </section>
-                    <section id="prediction" class="prediction">
-                        <p id="prediction-text"></p>
-                        <div class="bar" aria-hidden="true"><span id="bar-you" class="you"></span><span class="opp"></span></div>
+                    <p id="cmp-problem" class="note" hidden></p>
+                    <!-- "You lead by +413 official · +293 performance" -->
+                    <div id="lead" class="lead"></div>
+                    <!-- 5+ games together in this time class -->
+                    <section id="against" class="h2h" hidden>
+                        <h3 id="against-title"></h3>
+                        <p id="against-levels"></p>
+                        <p id="against-scored"></p>
                     </section>
-                    <ul id="compare-lines" class="lines"></ul>
+                    <section id="win" class="win">
+                        <div class="win-title">Win chance</div>
+                        <div class="wbar" aria-hidden="true"><span id="wbar-y" class="y"></span><span id="wbar-d" class="d"></span><span id="wbar-o" class="o"></span></div>
+                        <div class="win-legend">
+                            <span class="y"><span id="win-y-name"></span> <b id="win-y"></b></span>
+                            <span>draw <b id="win-d"></b></span>
+                            <span class="o"><span id="win-o-name"></span> <b id="win-o"></b></span>
+                        </div>
+                        <p id="based-on" class="note"></p>
+                    </section>
                     <details id="more" class="more">
                         <summary>More details</summary>
-                        <table id="more-table"></table>
-                        <div id="more-extra" class="more-extra"></div>
+                        <div id="more-body" class="more-body"></div>
                     </details>
                     <button type="button" id="open-compare" class="link">Full comparison ↗</button>
                 </div>
