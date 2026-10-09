@@ -17,9 +17,9 @@ So this looks at the actual games and works out a performance rating from recent
 Click the extension on a chess.com game or profile and you get two views:
 
 - **Me**: your current performance level, and your official rating next to it, and a "shadow rating" (what your rating would be if your unrated games counted) which is for me.
-- **Compare**: you vs whoever's on the page. Official and current performance side by side, who's ahead, how you do against each other if you've played 5+ games, and a win / draw / loss chance.
+- **Compare**: you vs whoever's on the page. Official and current performance for both of you, how you do against each other if you've played 5+ games, and a win / draw / loss chance.
 
-There's also a **Full comparison** tab with everything else. This is in progress:
+There's also a **Full comparison** tab with everything else. This whole comparison feature is still being developed, so expect it to change and some parts to be rough or unfinished. So far it has:
 
 - a race chart (who got to 1500, 2000, etc. first, in days and games)
 - volatility (how streaky someone is)

@@ -23,6 +23,17 @@ h3 {
   margin: 12px 0 4px;
 }
 
+/* "for debugging, still being worked on", under the title */
+.wip {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #e0a232;
+  border-radius: 6px;
+  background: #fdf3dc;
+  font-size: 13px;
+  color: #5c3d08;
+}
+
 [hidden] {
   display: none !important;
 }

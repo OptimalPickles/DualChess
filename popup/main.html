@@ -1,9 +1,11 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
     <head>
         <meta charset="utf-8" />
+        <title>Performance</title>
         <link rel="stylesheet" href="popup.css" />
     </head>
-    <body class="v2">
+    <body>
         <!-- loading, "open a chess.com page", errors -->
         <p id="status" class="status">Loading…</p>
 
@@ -18,26 +20,24 @@
         <div id="main" hidden>
             <!-- shared by both views -->
             <header class="header">
-                <div class="header-row">
-                    <div id="views" class="seg" role="group" aria-label="View">
-                        <button type="button" data-view="me" aria-pressed="false">Me</button>
-                        <button type="button" data-view="compare" aria-pressed="false">Compare</button>
-                    </div>
-                    <span id="updated" class="updated"></span>
+                <div id="views" class="seg" role="group" aria-label="View">
+                    <button type="button" data-view="me" aria-pressed="false">Me</button>
+                    <button type="button" data-view="compare" aria-pressed="false">Compare</button>
                 </div>
                 <!-- saved in chrome.storage.local -->
                 <label class="tc"><span class="sr">Time control</span>
                     <select id="ctl-time">
-                        <option value="auto">auto</option>
+                        <option value="auto">Auto</option>
                         <option value="bullet">Bullet</option>
                         <option value="blitz">Blitz</option>
                         <option value="rapid">Rapid</option>
                         <option value="daily">Daily</option>
                     </select>
                 </label>
+                <span id="updated" class="updated"></span>
             </header>
 
-            <main class="body">
+            <main>
                 <p id="no-opponent" class="note" hidden>No opponent on this page</p>
 
                 <!-- fair play: a game is in progress, so this is all the body shows -->
@@ -46,42 +46,47 @@
                     <p><strong>Game in progress.</strong> Stats will appear when it ends.</p>
                 </div>
 
-                <div id="view-me" class="view" hidden>
-                    <section id="me-level" class="player player--solo"></section>
-                    <ul id="me-lines" class="lines"></ul>
-                    <button type="button" id="open-stats" class="link">Full stats ↗</button>
+                <div id="view-me" hidden>
+                    <div class="solo">
+                        <section id="me-level" class="pl y"></section>
+                        <ul id="me-lines" class="lines"></ul>
+                    </div>
+                    <div class="actions">
+                        <button type="button" id="open-stats" class="link">Full stats ↗</button>
+                    </div>
                 </div>
 
-                <div id="view-compare" class="view lf" hidden>
-                    <!-- one card per player: official big, current performance under it -->
-                    <section class="cards">
-                        <div id="card-0" class="p"></div>
-                        <div id="card-1" class="p o"></div>
-                    </section>
-                    <p id="cmp-problem" class="note" hidden></p>
-                    <!-- "You lead by +413 official · +293 performance" -->
-                    <div id="lead" class="lead"></div>
-                    <!-- 5+ games together in this time class -->
-                    <section id="against" class="h2h" hidden>
-                        <h3 id="against-title"></h3>
-                        <p id="against-levels"></p>
-                        <p id="against-scored"></p>
-                    </section>
-                    <section id="win" class="win">
-                        <div class="win-title">Win chance</div>
-                        <div class="wbar" aria-hidden="true"><span id="wbar-y" class="y"></span><span id="wbar-d" class="d"></span><span id="wbar-o" class="o"></span></div>
-                        <div class="win-legend">
-                            <span class="y"><span id="win-y-name"></span> <b id="win-y"></b></span>
-                            <span>draw <b id="win-d"></b></span>
-                            <span class="o"><span id="win-o-name"></span> <b id="win-o"></b></span>
+                <div id="view-compare" hidden>
+                    <div class="board">
+                        <!-- win chance as an eval bar: the opponent on top, you at the bottom -->
+                        <div id="eval" class="eval" role="img"><span id="wbar-o" class="o"></span><span id="wbar-d" class="d"></span><span id="wbar-y" class="y"></span></div>
+                        <div class="col">
+                            <!-- one strip per player, as at a board: performance on the left, official big on the right -->
+                            <div id="card-1" class="pl o"></div>
+                            <div class="mid">
+                                <p id="cmp-problem" class="note" hidden></p>
+                                <section id="win" class="blk">
+                                    <h3>Win chance</h3>
+                                    <p><b class="y"><span id="win-y-name"></span> <span id="win-y"></span></b> · draw <b id="win-d"></b> · <b class="o"><span id="win-o-name"></span> <span id="win-o"></span></b></p>
+                                    <p id="based-on" class="note"></p>
+                                </section>
+                                <!-- 5+ games together in this time class -->
+                                <section id="against" class="blk" hidden>
+                                    <h3 id="against-title"></h3>
+                                    <p id="against-levels"></p>
+                                    <p id="against-scored"></p>
+                                </section>
+                            </div>
+                            <div id="card-0" class="pl y"></div>
                         </div>
-                        <p id="based-on" class="note"></p>
-                    </section>
-                    <details id="more" class="more">
-                        <summary>More details</summary>
-                        <div id="more-body" class="more-body"></div>
-                    </details>
-                    <button type="button" id="open-compare" class="link">Full comparison ↗</button>
+                    </div>
+                    <div class="actions">
+                        <details id="more" class="more">
+                            <summary>More details</summary>
+                            <div id="more-body" class="more-body"><p class="note">Coming soon. This part is still being worked on.</p></div>
+                        </details>
+                        <button type="button" id="open-compare" class="link">Full comparison ↗</button>
+                    </div>
                 </div>
             </main>
 

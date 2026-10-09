@@ -215,6 +215,8 @@ async function buildView() {
 
   view.me = {
     ...levelModel(null, primary, stats[primary], missing[primary], mePerf, now),
+    // the strip's two numbers, the same ones a Compare strip gets
+    card: { official: mePerf?.official ?? null, current: mePerf?.perf == null ? null : { perf: mePerf.perf } },
     today: todayParts(mePerf?.session, now),
     shadow: timeClass && stats[primary] ? shadowLine(await shadowWindowFromCache(primary, timeClass, now)) : null,
   };
@@ -248,24 +250,6 @@ const el = (tag, text, className) => {
   return node;
 };
 
-// a player's level. solo (Me): the number with its details beside it. a column (Compare):
-// name on top. the dot always comes with its word (High / Medium / Low)
-function renderLevel(container, m, { solo = false } = {}) {
-  container.innerHTML = "";
-  container.classList.toggle("player--low", m.label === "Low");
-  if (m.name) container.appendChild(el("div", m.name, "name"));
-  if (m.problem) {
-    container.appendChild(el("div", m.problem, "official"));
-    return;
-  }
-  container.appendChild(el("div", String(m.level), "level"));
-  const meta = solo ? el("div", null, "meta") : container;
-  meta.appendChild(el("div", m.label, `conf conf--${{ High: "high", Medium: "med", Low: "low" }[m.label]}`));
-  meta.appendChild(el("div", m.official, "official"));
-  if (m.inactive) meta.appendChild(el("div", m.inactive, "stale"));
-  if (solo) container.appendChild(meta);
-}
-
 // "Today: 4W 1D 1L · 70 above your usual" and "Shadow 2165 · ...", key muted, figure bold
 function line(key, bold, rest, caveat) {
   const li = el("li", null, "line");
@@ -288,33 +272,43 @@ function renderLines(id, lines) {
   list.hidden = !lines.length;
 }
 
-// one card: name, "Official" and the big official rating, then "Perf 2009 ● Medium"
+// one strip: name over "Performance 2009", the official rating big on the right
 function renderCard(container, name, official, current) {
   container.innerHTML = "";
-  container.append(el("div", name, "nm"), el("div", "Official", "lbl"), el("div", official == null ? "—" : String(official), "big"));
   const perf = el("div", null, "perf");
-  perf.append(el("span", "Perf"), " ", el("b", current ? String(current.perf) : "—"));
-  if (current) perf.append(" ", el("span", current.label, `conf conf--${{ High: "high", Medium: "med", Low: "low" }[current.label]}`));
-  container.appendChild(perf);
+  perf.append("Performance ", el("strong", current ? String(current.perf) : "—"));
+  const off = el("div", null, "off");
+  off.append(el("b", official == null ? "—" : String(official)), el("small", "official"));
+  container.append(el("div", name, "nm"), perf, off);
+}
+
+// you (Me): the same strip as in Compare, or one line saying why there's nothing to show
+function renderLevel(container, m) {
+  if (!m.problem) return renderCard(container, "You", m.card.official, m.card.current);
+  container.innerHTML = "";
+  container.append(el("div", "You", "nm"), el("div", m.problem, "perf"));
+}
+
+// the eval bar: a segment's height is its percent. the number is left out of a segment
+// too short to hold it, and a segment at 0 isn't drawn
+const EVAL_LABEL_MIN = 12;
+function renderEval(chance, label) {
+  const bar = document.getElementById("eval");
+  bar.hidden = !chance;
+  if (!chance) return;
+  bar.setAttribute("aria-label", label);
+  for (const [id, value, labelled] of [["wbar-o", chance.loss, true], ["wbar-d", chance.draw, false], ["wbar-y", chance.win, true]]) {
+    const seg = document.getElementById(id);
+    seg.hidden = !value;
+    seg.style.flex = String(value);
+    seg.textContent = labelled && value >= EVAL_LABEL_MIN ? String(value) : "";
+  }
 }
 
 // parts where every odd one is bold: ["You play at ", "1790", " vs ", "1654", " (±100)"]
 function fillParts(node, parts) {
   node.innerHTML = "";
   parts.forEach((text, i) => node.append(i % 2 ? el("b", text) : text));
-}
-
-// More details, as sentences under small headings
-function renderMore(more) {
-  const body = document.getElementById("more-body");
-  body.innerHTML = "";
-  const group = (title, lines) => {
-    body.appendChild(el("p", title, "more-title"));
-    for (const text of lines) body.appendChild(el("p", text));
-  };
-  group("Last 90 days, all opponents", more.form);
-  group("Consistency", more.consistency);
-  if (more.against) group("Against each other", [more.against]);
 }
 
 // final = sync has run, so missing numbers are real failures, not "still loading".
@@ -334,12 +328,15 @@ async function render({ final = false } = {}) {
   lastSignature = signature;
   console.log("[Performance] render:", view);
 
-  document.querySelector('#ctl-time option[value="auto"]').textContent = view.autoText;
+  // the pill says "Auto · Bullet", where it came from is in its tooltip
+  const tc = view.timeClass;
+  document.querySelector('#ctl-time option[value="auto"]').textContent = tc ? `Auto · ${tc[0].toUpperCase()}${tc.slice(1)}` : "Auto";
+  document.getElementById("ctl-time").title = view.autoText;
   document.getElementById("updated").textContent = view.updated;
   current.timeClass = view.timeClass;
 
   // Me
-  renderLevel(document.getElementById("me-level"), view.me, { solo: true });
+  renderLevel(document.getElementById("me-level"), view.me);
   const me = [];
   if (view.me.today) me.push(line("Today:", view.me.today.wdl, view.me.today.rest));
   if (view.me.shadow) me.push(line("Shadow", view.me.shadow.level, view.me.shadow.rest, view.me.shadow.flags.join(". ")));
@@ -351,14 +348,6 @@ async function render({ final = false } = {}) {
     const c = view.compare;
     view.names.forEach((name, i) => renderCard(document.getElementById(`card-${i}`), name, c.official[i], c.current[i]));
     setLine("cmp-problem", view.problems.join(" "));
-    // one span, so the line centers as a whole; the numbers in it are bold
-    const lead = document.getElementById("lead");
-    lead.innerHTML = "";
-    const leadLine = el("span");
-    fillParts(leadLine, c.lead);
-    leadLine.querySelectorAll("b").forEach((b, i) => (b.className = c.leadSides[i]));
-    lead.appendChild(leadLine);
-    lead.hidden = !c.lead.join("");
     document.getElementById("against").hidden = !c.against;
     if (c.against) {
       document.getElementById("against-title").textContent = c.against.title;
@@ -369,10 +358,8 @@ async function render({ final = false } = {}) {
     }
     const ch = c.chance;
     document.getElementById("win").hidden = !ch;
+    renderEval(ch, c.win);
     if (ch) {
-      document.getElementById("wbar-y").style.flex = String(ch.win);
-      document.getElementById("wbar-d").style.flex = String(ch.draw);
-      document.getElementById("wbar-o").style.flex = String(ch.loss);
       document.getElementById("win-y-name").textContent = view.names[0];
       document.getElementById("win-o-name").textContent = view.names[1];
       document.getElementById("win-y").textContent = `${ch.win}%`;
@@ -380,7 +367,6 @@ async function render({ final = false } = {}) {
       document.getElementById("win-o").textContent = `${ch.loss}%`;
     }
     document.getElementById("based-on").textContent = c.basedOn;
-    renderMore(c.more);
     document.getElementById("open-compare").hidden = !view.timeClass;
   }
 
@@ -452,7 +438,8 @@ function showLocked() {
   document.getElementById("lock").hidden = false;
   for (const id of ["view-me", "view-compare", "no-opponent"]) document.getElementById(id).hidden = true;
   document.getElementById("updated").textContent = "";
-  document.querySelector('#ctl-time option[value="auto"]').textContent = "auto";
+  document.querySelector('#ctl-time option[value="auto"]').textContent = "Auto";
+  document.getElementById("ctl-time").title = "";
   document.getElementById("ctl-time").disabled = true;
   for (const button of document.querySelectorAll("#views button")) button.disabled = true;
   refreshTimer = setTimeout(() => init(), REFRESH_MS);
