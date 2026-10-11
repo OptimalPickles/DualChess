@@ -20,12 +20,12 @@ Click the extension on a chess.com game or profile and you get two views:
 - **Compare**: you vs whoever's on the page. Official and current performance for both of you, how you do against each other if you've played 5+ games, and a win / draw / loss chance.
 
 <p>
-  <img src="screenshots/compare-dark.png" alt="The Compare view in dark mode: both players' official and performance ratings, win chance, and how they do against each other" width="300">
-  <img src="screenshots/compare-light.png" alt="The same Compare view in light mode" width="300">
-  <img src="screenshots/me-dark.png" alt="The Me view: your performance and official rating, today's record, and the shadow rating" width="300">
+  <img src="screenshots/compare-dark.png" alt="The Compare view against someone you've barely played: both players' official and performance ratings, and the win chance" width="290" align="top">
+  <img src="screenshots/compare-frequent-dark.png" alt="The Compare view against someone you've played a lot: the same, plus an Against each other card with the level each of you plays at in the matchup and your score against what was expected" width="290" align="top">
+  <img src="screenshots/me-dark.png" alt="The Me view: your performance and official rating, today's record, and the shadow rating" width="290" align="top">
 </p>
 
-The numbers and the opponent in these are sample data.
+Left: Compare against someone you've barely played. Middle: someone you've played a lot (5+ games in the last 60 days), which adds the **Against each other** card and lets the head-to-head count towards the win chance. Right: Me. The numbers and the opponent in these are sample data.
 
 There's also a **Full comparison** tab with everything else. This whole comparison feature is still being developed, so expect it to change and some parts to be rough or unfinished. So far it has:
 
@@ -82,7 +82,7 @@ Nothing gets sent anywhere else. No account, no login, no analytics, no server o
 ## Some of the math, quickly
 
 - **Performance** is the rating that would make your expected score match your actual score over your last 20 games, using everyone's rating from *before* each game (chess.com saves the after one).
-- **Confidence** drops the fewer games there are and the longer it's been since you played. Players whose level is steady keep their confidence longer.
+- **Confidence** drops the fewer games there are and the longer it's been since you played. This is shown through the variation of play such as ± rating on performance. It becomes more accurate as more games are played. 
 - **Win chance** starts from the expected score, then splits the draws out using how often each of you has drawn in that time control over the last 60 days (against everyone, not just each other). If you've played each other a lot, the head-to-head counts for more. Some people have a sort of Magnus Effect against others. 
 - **Shadow rating** replays your unrated games as if they were rated, starting from your last real rating. Honest result: it doesn't predict my rated games better than my official rating does, and the card says so. Mainly for me since i would have to play on alt accounts so my main rating isn't severly affected on bad days. 
 
