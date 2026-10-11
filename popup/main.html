@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>Performance</title>
+        <title>DualChess</title>
         <link rel="stylesheet" href="popup.css" />
     </head>
     <body>
@@ -20,7 +20,7 @@
         <div id="main" hidden>
             <!-- shared by both views -->
             <header class="header">
-                <div id="views" class="seg" role="group" aria-label="View">
+                <div id="views" class="tabs" role="group" aria-label="View">
                     <button type="button" data-view="me" aria-pressed="false">Me</button>
                     <button type="button" data-view="compare" aria-pressed="false">Compare</button>
                 </div>
@@ -41,52 +41,45 @@
                 <p id="no-opponent" class="note" hidden>No opponent on this page</p>
 
                 <!-- fair play: a game is in progress, so this is all the body shows -->
-                <div id="lock" class="lock" role="status" hidden>
-                    <span class="pulse" aria-hidden="true"></span>
-                    <p><strong>Game in progress.</strong> Stats will appear when it ends.</p>
-                </div>
-
-                <div id="view-me" hidden>
-                    <div class="solo">
-                        <section id="me-level" class="pl y"></section>
-                        <ul id="me-lines" class="lines"></ul>
-                    </div>
-                    <div class="actions">
-                        <button type="button" id="open-stats" class="link">Full stats ↗</button>
+                <div id="lock" class="body" role="status" hidden>
+                    <div class="card lock">
+                        <span class="pulse" aria-hidden="true"></span>
+                        <p><strong>Game in progress.</strong> Stats will appear when it ends.</p>
                     </div>
                 </div>
 
-                <div id="view-compare" hidden>
-                    <div class="board">
-                        <!-- win chance as an eval bar: the opponent on top, you at the bottom -->
-                        <div id="eval" class="eval" role="img"><span id="wbar-o" class="o"></span><span id="wbar-d" class="d"></span><span id="wbar-y" class="y"></span></div>
-                        <div class="col">
-                            <!-- one strip per player, as at a board: performance on the left, official big on the right -->
-                            <div id="card-1" class="pl o"></div>
-                            <div class="mid">
-                                <p id="cmp-problem" class="note" hidden></p>
-                                <section id="win" class="blk">
-                                    <h3>Win chance</h3>
-                                    <p><b class="y"><span id="win-y-name"></span> <span id="win-y"></span></b> · draw <b id="win-d"></b> · <b class="o"><span id="win-o-name"></span> <span id="win-o"></span></b></p>
-                                    <p id="based-on" class="note"></p>
-                                </section>
-                                <!-- 5+ games together in this time class -->
-                                <section id="against" class="blk" hidden>
-                                    <h3 id="against-title"></h3>
-                                    <p id="against-levels"></p>
-                                    <p id="against-scored"></p>
-                                </section>
-                            </div>
-                            <div id="card-0" class="pl y"></div>
+                <div id="view-me" class="body" hidden>
+                    <section id="me-level" class="strip y"></section>
+                    <ul id="me-lines" class="card lines"></ul>
+                    <button type="button" id="open-stats" class="cta">Full stats ↗</button>
+                </div>
+
+                <div id="view-compare" class="body" hidden>
+                    <!-- one strip per player, the opponent on top as at a board: the initial,
+                         the name over "Performance 2009 ± 85", the official rating big on the right -->
+                    <div id="card-1" class="strip o"></div>
+                    <p id="cmp-problem" class="note" hidden></p>
+                    <div id="card-0" class="strip y"></div>
+                    <section id="win" class="card">
+                        <h3>Win chance</h3>
+                        <div id="wbar" class="wbar" role="img"><span id="wbar-y" class="y"></span><span id="wbar-d" class="d"></span><span id="wbar-o" class="o"></span></div>
+                        <div class="legend"><span id="win-y-name"></span><span>draw <span id="win-d"></span></span><span id="win-o-name"></span></div>
+                        <p id="based-on" class="note"></p>
+                    </section>
+                    <!-- 5+ games together in this time class -->
+                    <section id="against" class="card" hidden>
+                        <h3 id="against-title"></h3>
+                        <div class="tiles">
+                            <div id="against-levels" class="tile"></div>
+                            <div id="against-scored" class="tile"></div>
                         </div>
-                    </div>
+                    </section>
                     <div class="actions">
-                        <details id="more" class="more">
-                            <summary>More details</summary>
-                            <div id="more-body" class="more-body"><p class="note">Coming soon. This part is still being worked on.</p></div>
-                        </details>
-                        <button type="button" id="open-compare" class="link">Full comparison ↗</button>
+                        <details id="more" class="more"><summary>More details</summary></details>
+                        <button type="button" id="open-compare" class="cta">Full comparison ↗</button>
                     </div>
+                    <!-- shown by css while the details above are open -->
+                    <div id="more-body" class="card more-body"><p class="note">Coming soon. This part is still being worked on.</p></div>
                 </div>
             </main>
 

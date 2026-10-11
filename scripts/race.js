@@ -24,8 +24,9 @@ const RACE_CONFIG = {
   sparseWindowDays: 365,
   sparseMinSessions: 3,
   sessionMinGames: 5,
-  // volatility: sessions in the last 12 months, minus the first 20 games after a 60+ day break
-  volatilityWindowDays: 365,
+  // volatility: sessions in the last 60 days (everything stored), minus the first 20 games
+  // after a 60+ day break
+  volatilityWindowDays: 60,
   rustGames: 20,
   rustBeforeGames: 50,
   volatilityLabels: { steady: 50, streaky: 120 },
@@ -107,7 +108,7 @@ function gamesBy(point, counted = RACE_CONFIG.gamesCounted) {
 
 // --- the journey, one game at a time ---
 // a fold, so the state at the end of a finished month can be saved and the current month
-// added on top later (see fetchJourney in data.js). journeyOf() folds everything at once
+// added on top later. journeyOf() folds everything at once
 
 function newJourneyState({ keepPoints = false } = {}) {
   return {
@@ -553,7 +554,7 @@ function volatilityFromSessions(sessions) {
   };
 }
 
-// sessions of 5+ games in the last 12 months, leaving out the first 20 games after any
+// sessions of 5+ games in the last 60 days, leaving out the first 20 games after any
 // 60+ day break (rust isn't their normal form)
 function volatilityOf(records, now) {
   const c = RACE_CONFIG;
@@ -898,7 +899,7 @@ const shortDate = (t) => new Date(t * 1000).toLocaleDateString("en-US", { month:
 // a volatility card: [title, lines...]
 function volatilityText(name, vol, rust) {
   if (!vol || vol.label === "Not enough sessions") {
-    return [`${name} · Not enough sessions`, "Needs 3+ sessions of 5+ games in the last 12 months"];
+    return [`${name} · Not enough sessions`, "Needs 3+ sessions of 5+ games in the last 60 days"];
   }
   const lines = [
     `${name} · ${vol.label} (${Math.round(vol.volatility)})`,
@@ -1002,7 +1003,7 @@ const RACE_METHODOLOGY = {
     "those games had been rated. Every opponent counts, frequent ones included.",
   volatility:
     "Volatility is how much a player's session performances really swing, using sessions of 5 or " +
-    "more games in the last 12 months, after taking out what small samples swing by luck alone. " +
+    "more games in the last 60 days, after taking out what small samples swing by luck alone. " +
     "Under 50 is Steady, 50 to 120 Normal, over 120 Streaky. The first 20 games after a break of " +
     "60 days or more are left out, since rust isn't normal form.",
   projection:

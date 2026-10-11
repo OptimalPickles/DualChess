@@ -1,253 +1,143 @@
-/* low effort on purpose: this page is a temporary home for the details */
+/* the full comparison page, in the popup's style (Claude Design 9f "Ice vs cyan"): the same
+   tokens, sections as cards with a violet ring, matte buttons with a solid bottom edge.
+   you are ice white (deep slate in light mode), the other player cyan. keep the tokens in
+   step with popup/popup.css */
+:root {
+  --bg: #f1f3f8; --panel: #ffffff; --raise: #e4e6f1; --raise-sh: #c3c7da;
+  --ink: #171b26; --muted: #5b6577; --line: #dde1ec;
+  --accent: #5a4acb; --accent-sh: #3f31a0; --on-accent: #fff;
+  --vi: #5a4acb; --vi-soft: #eceafb; --vi-line: #d5d1f2; --vi-sh: #c2bde9; --vi-ink: #2f2a66; --tile-label: #5d55a8;
+  --you: #2c3550; --you-ink: #232b42; --on-you: #ffffff;
+  --opp: #12a9c4; --opp-ink: #0a7285; --on-opp: #03252b;
+  --link: #5a4acb;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141a22; --panel: #1b232d; --raise: #26283f; --raise-sh: #0c1117;
+    --ink: #eef2f6; --muted: #9aa7b6; --line: #27313d;
+    --accent: #6a5adc; --accent-sh: #4636a8; --on-accent: #fff;
+    --vi: #a99ff5; --vi-soft: #2b2950; --vi-line: #3a3570; --vi-sh: #17152e; --vi-ink: #e3dfff; --tile-label: #b9b2e8;
+    --you: #dfe6f2; --you-ink: #eef2f8; --on-you: #161a24;
+    --opp: #38d6f0; --opp-ink: #8ce6f6; --on-opp: #03252b;
+    --link: #b4abf7;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141a22; --panel: #1b232d; --raise: #26283f; --raise-sh: #0c1117;
+  --ink: #eef2f6; --muted: #9aa7b6; --line: #27313d;
+  --accent: #6a5adc; --accent-sh: #4636a8; --on-accent: #fff;
+  --vi: #a99ff5; --vi-soft: #2b2950; --vi-line: #3a3570; --vi-sh: #17152e; --vi-ink: #e3dfff; --tile-label: #b9b2e8;
+  --you: #dfe6f2; --you-ink: #eef2f8; --on-you: #161a24;
+  --opp: #38d6f0; --opp-ink: #8ce6f6; --on-opp: #03252b;
+  --link: #b4abf7;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
 body {
-  font-family: system-ui, sans-serif;
   max-width: 960px;
   margin: 0 auto;
   padding: 16px;
-  color: #222;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Segoe UI", system-ui, sans-serif;
   font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
 }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
 
-h1 {
-  font-size: 18px;
-  margin: 0 0 4px;
-}
-
-h2 {
-  font-size: 15px;
-  margin: 0 0 8px;
-}
-
-h3 {
-  font-size: 13px;
-  margin: 12px 0 4px;
-}
+h1 { font-size: 20px; font-weight: 800; letter-spacing: -.01em; margin: 0 0 8px; }
+/* section headings, like the popup's card headings */
+h2 { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; color: var(--vi); margin: 0 0 8px; }
+h3 { font-size: 13px; font-weight: 800; margin: 14px 0 4px; }
 
 /* "for debugging, still being worked on", under the title */
-.wip {
-  margin: 0 0 10px;
-  padding: 8px 10px;
-  border: 1px solid #e0a232;
-  border-radius: 6px;
-  background: #fdf3dc;
-  font-size: 13px;
-  color: #5c3d08;
-}
+.wip { margin: 0 0 10px; padding: 9px 12px; border-radius: 8px; background: var(--vi-soft); box-shadow: inset 0 0 0 1px var(--vi-line); font-size: 13px; color: var(--vi-ink); }
 
-[hidden] {
-  display: none !important;
-}
+#status { margin: 0 0 10px; font-size: 14px; font-weight: 800; }
 
-#status {
-  font-size: 13px;
-  color: #444;
+/* matte buttons and dropdowns: a solid 3px bottom edge that shortens when pressed */
+select, #history-prompt button {
+  --sh: var(--raise-sh);
+  height: 30px; padding: 0 12px; border: 0; border-radius: 6px;
+  font: inherit; font-weight: 700; color: var(--ink); cursor: pointer;
+  background-color: var(--raise); box-shadow: 0 3px 0 var(--sh);
 }
+select {
+  appearance: none; -webkit-appearance: none; padding: 0 26px 0 10px;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%) right 13px center / 5px 5px no-repeat,
+    linear-gradient(-45deg, transparent 50%, var(--muted) 50%) right 9px center / 5px 5px no-repeat,
+    var(--raise);
+}
+select:disabled { opacity: 0.5; cursor: default; }
+#history-prompt button:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--sh); }
+#history-load { --sh: var(--accent-sh); color: var(--on-accent); background-color: var(--accent); }
+#history-load:hover { filter: brightness(1.06); }
+input[type="checkbox"] { accent-color: var(--accent); }
 
-#controls {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
-}
+#controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 
-section {
-  border-top: 1px solid #ddd;
-  padding: 12px 0;
-  font-size: 13px;
-}
+/* every section is a card */
+section { margin: 0 0 10px; padding: 14px; border-radius: 8px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--vi-line); font-size: 13px; }
+section p { margin: 2px 0; }
+.note { font-size: 12px; color: var(--muted); }
 
-section p {
-  margin: 2px 0;
-}
-
-.note {
-  font-size: 12px;
-  color: #666;
-}
-
-.players {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 24px;
-}
-
-.player-card {
-  flex: 1 1 360px;
-}
-
-.player-name {
-  font-weight: bold;
-}
-
-.ratings {
-  border-collapse: collapse;
-  font-size: 12px;
-  margin-bottom: 4px;
-}
-
-.ratings th {
-  font-weight: normal;
-  color: #777;
-  padding: 0 10px 0 0;
-  text-align: left;
-}
-
-.ratings td {
-  padding: 0 10px 0 0;
-}
-
-.perf-main {
-  font-weight: bold;
-}
-
-.perf-sub,
-.h2h-sub {
-  font-size: 12px;
-  color: #555;
-}
-
-.low-conf {
-  color: #999;
-  font-weight: normal;
-}
-
-.h2h-title {
-  font-weight: bold;
-}
-
-.h2h-recent {
-  margin: 4px 0;
-  padding-left: 16px;
-  font-size: 12px;
-}
-
-#matchup {
-  margin-top: 8px;
-}
+/* players: a 3px left edge in the player's color, like the popup's strips */
+.players { display: flex; flex-wrap: wrap; gap: 10px; }
+.player-card { flex: 1 1 360px; padding: 10px 12px; border-radius: 6px; background: var(--bg); box-shadow: inset 3px 0 0 var(--you); }
+.player-card + .player-card { box-shadow: inset 3px 0 0 var(--opp); }
+.player-name { font-size: 14px; font-weight: 800; }
+.ratings { border-collapse: collapse; font-size: 12px; margin: 4px 0; }
+.ratings th { font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 0 14px 0 0; text-align: left; }
+.ratings td { font-size: 16px; font-weight: 800; padding: 0 14px 0 0; }
+.perf-main { font-weight: 800; }
+.perf-sub, .h2h-sub { font-size: 12px; color: var(--muted); }
+.low-conf { color: var(--muted); font-weight: 400; }
+.h2h-title { font-weight: 800; }
+.h2h-recent { margin: 6px 0; padding-left: 16px; font-size: 12px; }
+#matchup { margin-top: 8px; }
 
 /* plain tables: monthly head-to-head, data states, climb, shadow windows */
-.plain {
-  border-collapse: collapse;
-  font-size: 12px;
-  margin-top: 6px;
-}
+.plain { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.plain th, .plain td { padding: 4px 12px 4px 0; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+.plain th { font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+#climb, #states, #shadow, #h2h { overflow-x: auto; }
 
-.plain th,
-.plain td {
-  padding: 2px 8px 2px 0;
-  text-align: left;
-  border-bottom: 1px solid #f0f0f0;
-  vertical-align: top;
-}
-
-.plain th {
-  color: #777;
-  font-weight: normal;
-}
-
-#history-prompt {
-  border: 1px solid #c90;
-  background: #fff8e6;
-  border-radius: 4px;
-  padding: 8px;
-  margin: 6px 0;
-  font-size: 12px;
-}
-
-#history-prompt button {
-  margin-right: 6px;
-}
+/* "Load all games": progress, and the question before a big download */
+#history-status { margin: 0 2px 10px; }
+#history-status:empty { display: none; }
+#history-prompt { margin: 0 0 10px; padding: 12px; border-radius: 8px; background: var(--vi-soft); box-shadow: inset 0 0 0 1px var(--vi-line); color: var(--vi-ink); }
+#history-prompt p { margin: 0 0 10px; }
+#history-prompt button { margin: 0 6px 3px 0; }
 
 /* race */
-.race-headline {
-  font-weight: bold;
-  margin: 4px 0 6px;
-}
-
-.race-tile {
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  padding: 4px 6px;
-  margin: 4px 0;
-}
-
-.race-tile p,
-.race-card p {
-  font-size: 12px;
-  color: #444;
-}
-
-.race-tile-title {
-  font-weight: bold;
-  color: #222 !important;
-}
-
+.race-headline { font-size: 14px; font-weight: 800; margin: 4px 0 8px; }
+.race-tile { padding: 8px 10px; margin: 6px 0; border-radius: 6px; background: var(--vi-soft); }
+.race-tile p, .race-card p { font-size: 12px; color: var(--muted); }
+.race-tile p { color: var(--tile-label); }
+.race-tile .race-tile-title, .race-card .race-tile-title { font-size: 13px; font-weight: 800; color: var(--ink); }
 /* the race picked in the milestone dropdown */
-.race-tile.selected {
-  border-color: #2563eb;
-}
-
-#race-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  margin: 8px 0 4px;
-  font-size: 12px;
-}
-
-#race-chart {
-  width: 100%;
-  height: 420px;
-}
-
-#race-cards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.race-card {
-  flex: 1 1 300px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  padding: 6px 8px;
-}
-
+.race-tile.selected { box-shadow: inset 0 0 0 2px var(--accent); }
+#race-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 6px; font-size: 12px; }
+#race-controls label { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; color: var(--muted); }
+#race-chart { width: 100%; height: 420px; }
+#race-chart:empty { display: none; }
+#race-cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.race-card { flex: 1 1 300px; padding: 10px 12px; border-radius: 6px; background: var(--bg); }
 /* the shadow rating card stands apart a little: it's an estimate, not a record */
-.race-card.shadow {
-  border-style: dashed;
-  border-color: #2563eb;
-  max-width: 640px;
-}
-
-#race-footer {
-  margin-top: 10px;
-  font-size: 11px;
-  color: #777;
-}
+.race-card.shadow { max-width: 640px; box-shadow: inset 0 0 0 1px var(--vi-line); background: var(--vi-soft); }
+#race-footer { margin-top: 10px; font-size: 11.5px; color: var(--muted); }
 
 /* a button that looks like a link (no inline onclick in mv3, so a real button) */
-button.link {
-  display: block;
-  margin-top: 6px;
-  padding: 0;
-  font-size: 11px;
-  color: #666;
-  background: none;
-  border: none;
-  text-decoration: underline;
-  cursor: pointer;
-}
+button.link { display: block; margin-top: 6px; padding: 0; border: 0; background: none; font: inherit; font-size: 12px; font-weight: 700; color: var(--link); cursor: pointer; }
+button.link:hover { text-decoration: underline; text-underline-offset: 2px; }
+button.link.inline { display: inline; margin: 0; }
 
-button.link.inline {
-  display: inline;
-  margin: 0;
-}
-
-#methodology p {
-  font-size: 12px;
-  color: #444;
-  line-height: 1.4;
-  max-width: 720px;
-}
+#methodology p { font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 720px; margin: 0 0 8px; }

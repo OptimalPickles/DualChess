@@ -1,6 +1,8 @@
-// the full comparison tab: every detail for a (and b, if there is one), from storage alone.
-// the popup's sync is what fills storage, this page never asks chess.com for those numbers.
-// the one thing it downloads is a full history, for the race, climb and shadow rating, and
+// the full comparison tab: every detail for a (and b, if there is one), from storage alone:
+// the last 60 days, which the popup's sync keeps there. this page never asks chess.com for
+// those numbers. what needs older games (the race, climb, all-time head-to-head, the longer
+// shadow windows) shows "Needs full history · Load all games" until that button is used.
+// the full history is then downloaded into memory, for as long as this page is open, and
 // a big one is asked about first.
 // opened from the popup as compare.html?a=<user>&b=<opponent>&tc=<time class>
 // fair play: checks every open chess.com tab, and while any has a game in progress the
@@ -106,8 +108,8 @@ function renderPerformance(container, p, now) {
   }
 
   line(stabilityText(p.stability), "perf-sub");
-  // the highest rating after a rated game in the last 90 days, every opponent
-  line(`Peak, last 90 days: ${p.form?.peak ?? "no rated games"}`, "perf-sub");
+  // the highest rating after a rated game in the last 60 days, every opponent
+  line(`Peak, last 60 days: ${p.form?.peak ?? "no rated games"}`, "perf-sub");
 
   if (p.session) {
     const s = p.session;
@@ -212,8 +214,9 @@ function renderPrediction(container, pred, h2h, matchup) {
 
 // --- head-to-head ---
 
-// everything is from h2h.a's side
-function renderHeadToHead(container, h2h) {
+// everything is from h2h.a's side. full = every game ever (after "Load all games"),
+// otherwise the last 60 days
+function renderHeadToHead(container, h2h, full) {
   container.innerHTML = "";
   const line = (text, className) => {
     const p = document.createElement("p");
@@ -228,10 +231,12 @@ function renderHeadToHead(container, h2h) {
     return;
   }
   const filterText = `${h2h.opts.timeClass}${h2h.opts.rated === "all" ? "" : `, ${h2h.opts.rated}`}`;
+  const stretch = full ? "all time" : "last 60 days";
   if (!h2h.total) {
     // say if there are games, just not in this time class / rated setting
     const other = h2h.allTotal ? ` (${fmtCount(h2h.allTotal)} in other settings)` : "";
-    line(`No ${filterText} games between ${sayName(h2h.a)} and ${sayName(h2h.b)}${other}.`);
+    line(`No ${filterText} games between ${sayName(h2h.a)} and ${sayName(h2h.b)}${full ? "" : " in the last 60 days"}${other}.`);
+    if (!full) container.appendChild(needsHistoryLine("All-time head-to-head: "));
     return;
   }
 
@@ -241,7 +246,7 @@ function renderHeadToHead(container, h2h) {
   // "You win" reads right, "legendary9000 wins" too
   const wins = (name) => `${sayName(name)} ${sayName(name) === "You" ? "win" : "wins"}`;
 
-  line(`${sayName(h2h.a)} vs ${sayName(h2h.b)} · ${filterText}`, "h2h-title");
+  line(`${sayName(h2h.a)} vs ${sayName(h2h.b)} · ${filterText} · ${stretch}`, "h2h-title");
   line(`${fmtCount(h2h.total)} games · score ${score(h2h)}`);
   line(
     `${wins(h2h.a)} ${fmtCount(h2h.aWins)} (${share(h2h.aWins, h2h.total)}%) · ` +
@@ -273,6 +278,7 @@ function renderHeadToHead(container, h2h) {
 
   // a real rivalry (30+ games): how it went month by month
   if (isRivalry(h2h.games)) renderMonthly(container, h2hMonthly(h2hRows(h2h.games)).slice(0, 12));
+  if (!full) container.appendChild(needsHistoryLine("All-time head-to-head: "));
 }
 
 // a plain table: a header row, then one row per entry
@@ -304,7 +310,8 @@ function renderMonthly(container, months) {
   );
 }
 
-// --- the numbers that only need the cached recent games ---
+// --- the numbers that only need the stored 60 days ---
+// (after "Load all games" the head-to-head and matchup are redone over every game)
 
 async function renderDetails() {
   const { asked, names, pair, timeClass } = current;
@@ -329,22 +336,41 @@ async function renderDetails() {
     : "";
   if (!pair) return;
 
-  const h2hAll = await fetchHeadToHead(pair[0], pair[1], () => {}, opt);
+  const full = Boolean(current.full);
+  const h2hAll = await fetchHeadToHead(pair[0], pair[1], () => {}, { ...opt, full });
   const h2h = filterHeadToHead(h2hAll, { timeClass, rated: settings.rated }, now);
   // the matchup rating, for a real rivalry: the gap from results, anchored on field ratings
   const matchup = h2h && isRivalry(h2h.games) ? matchupOf(perfs, h2h, now) : null;
   renderPrediction(document.getElementById("prediction"), matchupPrediction(pair, perfs), h2h, matchup);
   renderMatchup(document.getElementById("matchup"), matchup);
-  renderHeadToHead(document.getElementById("h2h"), h2h);
+  renderHeadToHead(document.getElementById("h2h"), h2h, full);
 }
 
-// --- full history: race, data states, climb, shadow ---
-// the full histories are only downloaded here, and a big one is asked about first
+// --- full history: race, data states, climb, all-time head-to-head, longer shadow windows ---
+// only downloaded when "Load all games" is used, and a big one is asked about first.
+// nothing older than 60 days is written to storage: it lives in memory until the page closes
 
 // asked about at this size: chess.com sends ~4 KB a game, so 10 MB is ~2,500 games
 const LARGE_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 let historyGen = 0;
 let echartsLoading = null;
+
+// "Needs full history · Load all games": the one line a section shows until then
+function needsHistoryLine(prefix = "") {
+  const p = document.createElement("p");
+  p.className = "note";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link inline load-all";
+  button.textContent = "Load all games";
+  p.append(`${prefix}Needs full history · `, button);
+  return p;
+}
+
+function needsHistory(container, prefix) {
+  container.innerHTML = "";
+  container.appendChild(needsHistoryLine(prefix));
+}
 
 // echarts is ~1 MB, so it's only loaded when there's a race to draw
 function loadECharts() {
@@ -416,9 +442,9 @@ function askToLoadHistory(large, timeClass) {
     const parts = large.map((e) => `${whose(e.name)} full history is about ${e.missingMonths} months, ~${formatMB(e.bytes)} to download`);
     // it starts a sentence, so "your" becomes "Your"
     const list = parts.join("; ").replace(/^./, (c) => c.toUpperCase());
-    const needs = current.pair ? "The race needs" : "The climb breakdown and shadow rating need";
     document.getElementById("history-prompt-text").textContent =
-      `${needs} every ${timeClass} game. ${list}. It's saved after the first time. Load it?`;
+      `Loading all games downloads every month, not just ${timeClass}. ${list}. ` +
+      "It's kept only while this page is open (nothing older than 60 days is saved). Load it?";
     box.hidden = false;
     const finish = (answer) => {
       box.hidden = true;
@@ -429,19 +455,40 @@ function askToLoadHistory(large, timeClass) {
   });
 }
 
-// whatever's saved shows right away, then the rest is loaded (asking first if it's big)
-async function loadHistories() {
+// what the stored 60 days can show on their own: volatility and the 30-day shadow. every
+// section that needs older games says so in one line
+async function showRecent() {
+  const gen = historyGen;
+  const { names, timeClass } = current;
+  const players = await Promise.all(
+    names.map(async (name) => ({ name, journey: null, records: await recentRecords(name, timeClass, 0) }))
+  );
+  if (gen !== historyGen || current.full) return;
+  if (current.pair) {
+    needsHistory(document.getElementById("race-summary"), "Race and milestones: ");
+    renderRaceCards(players);
+  }
+  needsHistory(document.getElementById("states"));
+  needsHistory(document.getElementById("climb"));
+  renderShadow(players, Date.now());
+}
+
+// "Load all games": every month of everyone on the page (asking first if it's big), 3
+// requests in flight, then everything that needs the full history is drawn from memory
+async function loadAllGames() {
+  if (!current || locked || current.loading || current.full) return;
+  current.loading = true;
   const gen = ++historyGen;
   const stale = () => gen !== historyGen;
   const status = document.getElementById("history-status");
   const { names, timeClass } = current;
   document.getElementById("history-prompt").hidden = true;
+  const done = (text) => {
+    current.loading = false;
+    status.textContent = text;
+  };
   // the chart needs it next, so it starts loading now, in the background
   if (current.pair) loadECharts().catch((err) => console.warn("[Performance] echarts:", err));
-
-  const cached = await Promise.all(names.map((u) => fetchJourney(u, timeClass, { cacheOnly: true })));
-  if (stale()) return;
-  if (!cached.includes(null)) await showHistories(cached, gen);
 
   status.textContent = "Checking how much history this needs…";
   const estimates = await Promise.all(names.map((u) => estimateHistory(u)));
@@ -453,44 +500,43 @@ async function loadHistories() {
     status.textContent = "";
     const ok = await askToLoadHistory(large, timeClass);
     if (stale()) return;
-    if (!ok) {
-      status.textContent = cached.includes(null)
-        ? "Full history not loaded. Reload this page whenever you're ready."
-        : "Showing what's already saved. Reload this page to load the rest.";
-      return;
-    }
+    if (!ok) return done("Full history not loaded.");
     // asked once per browser session, not every time
     for (const e of large) approved[e.name] = true;
     await chrome.storage.session.set({ raceApproved: approved });
   }
 
   const progress = {};
-  const onProgress = (name) => (done, total) => {
-    progress[name] = [done, total];
-    const [d, t] = Object.values(progress).reduce(([a, b], [x, y]) => [a + x, b + y], [0, 0]);
-    if (!stale() && t > 1) status.textContent = `Loading full history… ${d}/${t} months`;
+  const onProgress = (name) => (d, t) => {
+    progress[name] = [d, t];
+    const [sum, total] = Object.values(progress).reduce(([a, b], [x, y]) => [a + x, b + y], [0, 0]);
+    if (!stale()) status.textContent = `Loading history… ${sum} / ${total} months`;
   };
-  const journeys = await Promise.all(names.map((u) => fetchJourney(u, timeClass, { onProgress: onProgress(u) })));
+  const started = performance.now();
+  const histories = await Promise.all(names.map((u) => fetchPlayerHistory(u, timeClass, onProgress(u), { preGame: true })));
   if (stale()) return;
-  if (journeys.includes(null)) {
-    status.textContent = "Couldn't load the full history. Try again in a minute.";
-    return;
-  }
-  await showHistories(journeys, gen);
-  const missingMonths = journeys.flatMap((j) => j.missingMonths || []);
-  status.textContent = missingMonths.length
-    ? `chess.com couldn't send ${missingMonths.length} month${missingMonths.length === 1 ? "" : "s"}, so some games may be missing.`
-    : "";
+  if (histories.includes(null)) return done("Couldn't load the full history. Try again in a minute.");
+  console.log(`[Performance] load all games: ${Math.round(performance.now() - started)} ms`);
+
+  const now = Date.now();
+  const players = names.map((name, i) => ({ name, records: histories[i].games, journey: journeyOf(histories[i].games, now) }));
+  current.full = true;
+  await showHistories(players, gen);
+  // the head-to-head and matchup again, over every game this time
+  if (!stale()) await renderDetails();
+  const missingMonths = histories.flatMap((h) => h.missingMonths);
+  done(
+    missingMonths.length
+      ? `chess.com couldn't send ${missingMonths.length} month${missingMonths.length === 1 ? "" : "s"}, so some games may be missing.`
+      : ""
+  );
 }
 
-// everything that needs the full history. each player's games in this time class, with
-// pre-game numbers, are read from storage once and shared by the cards, states, climb, shadow
-async function showHistories(journeys, gen) {
-  const { names, timeClass } = current;
-  const players = await Promise.all(
-    names.map(async (name, i) => ({ name, journey: journeys[i], records: await recentRecords(name, timeClass, 0) }))
-  );
-  if (gen !== historyGen) return;
+// everything that needs the full history. players: { name, records, journey }, each player's
+// games in this time class with pre-game numbers, shared by the cards, states, climb, shadow
+async function showHistories(players, gen) {
+  const { timeClass } = current;
+  const journeys = players.map((pl) => pl.journey);
   const now = Date.now();
 
   if (current.pair) {
@@ -506,9 +552,11 @@ async function showHistories(journeys, gen) {
 }
 
 // --- race chart ---
-// the app's colors: you are blue and solid, the other player amber and dashed, so the chart
-// still reads in grayscale and for colorblind readers. spectating: the first player is blue
-const RACE_COLORS = { primary: "#2563eb", other: "#d97706" };
+// the app's colors, read from the page's css so the chart follows light and dark. you are
+// solid and the other player dashed, so the chart still reads in grayscale and for
+// colorblind readers. spectating: the first player gets your color
+const cssColor = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const raceColors = () => ({ primary: cssColor("--you"), other: cssColor("--opp"), faint: cssColor("--muted"), grid: cssColor("--line") });
 const PLACEMENT_GAMES = RACE_CONFIG.placementGames;
 // the chart's settings, set by the race controls. kept for this page, not saved
 const raceOptions = { x: "days", view: "rating", smoothed: true, counted: RACE_CONFIG.gamesCounted, milestone: null, key: null };
@@ -558,7 +606,8 @@ function renderSelectedRace() {
   renderTile(container, lines, "race-tile selected");
 }
 
-// one volatility card per player
+// one volatility card per player, from the last 60 days. the rust check and the data states
+// need the journey, so they're only added once the full history is loaded
 function renderRaceCards(players) {
   const container = document.getElementById("race-cards");
   const now = Date.now();
@@ -568,11 +617,11 @@ function renderRaceCards(players) {
       renderTile(container, [`${sayName(name)} · Not enough sessions`, "Couldn't read their games"], "race-card");
       continue;
     }
-    const rust = rustCheck(records, journey, now);
+    const rust = journey ? rustCheck(records, journey, now) : null;
     const lines = volatilityText(sayName(name), volatilityOf(records, now), rust);
     // placing, inactive, returning, sparse: said right under the name. the rust line already
     // says "back from a 117-day break", so "returning" isn't said twice
-    const states = statesText(dataStates(records, journey, now).filter((st) => !(rust && st === "returning")), journey, now);
+    const states = journey ? statesText(dataStates(records, journey, now).filter((st) => !(rust && st === "returning")), journey, now) : "";
     if (states) lines.splice(1, 0, states);
     renderTile(container, lines, "race-card");
   }
@@ -656,10 +705,11 @@ function raceChartOption() {
   const { timeClass, journeys } = current.race;
   const { x, view, smoothed, counted, milestone } = raceOptions;
   const tc = timeClass[0].toUpperCase() + timeClass.slice(1);
+  const colors = raceColors();
   const youIndex = pair.indexOf(primary);
   const players = pair.map((name, i) => {
     const isPrimary = youIndex >= 0 ? i === youIndex : i === 0;
-    return { name, journey: journeys[i], color: isPrimary ? RACE_COLORS.primary : RACE_COLORS.other, dashed: !isPrimary };
+    return { name, journey: journeys[i], color: isPrimary ? colors.primary : colors.other, dashed: !isPrimary };
   });
   const lines = players.map((pl) => chartSeries(pl.journey, { x, counted, view, smoothed }));
   // the x of a daily point, the same way chartSeries works it out (gain view starts at game 60)
@@ -689,7 +739,7 @@ function raceChartOption() {
         lineStyle: { color: pl.color, width: 1.5, type: "dashed", opacity: 0.35 },
         itemStyle: { color: pl.color },
         // said once, on the first player's
-        endLabel: i === 0 ? { show: true, formatter: "Placement games", color: "#999", fontSize: 10 } : undefined,
+        endLabel: i === 0 ? { show: true, formatter: "Placement games", color: colors.faint, fontSize: 10 } : undefined,
       });
     }
 
@@ -725,7 +775,7 @@ function raceChartOption() {
         color: pl.color,
         position: i === 0 ? "insideTop" : "insideBottom",
       };
-      if (x === "games") markLines.push({ xAxis: from, label, lineStyle: { color: "#bbb", type: "dotted" } });
+      if (x === "games") markLines.push({ xAxis: from, label, lineStyle: { color: colors.faint, type: "dotted" } });
       // from the last game before the break to the first one after it
       else markAreas.push([{ xAxis: from, label }, { xAxis: from + (b.toDay - before.day) }]);
     }
@@ -765,7 +815,7 @@ function raceChartOption() {
         showSymbol: false,
         silent: true,
         lineStyle: { color: pl.color, width: 1.5, type: "dotted", opacity: 0.6 },
-        endLabel: { show: true, formatter: "Estimate", color: "#999", fontSize: 10 },
+        endLabel: { show: true, formatter: "Estimate", color: colors.faint, fontSize: 10 },
         tooltip: { show: false },
       });
     }
@@ -793,7 +843,7 @@ function raceChartOption() {
   if (view === "rating" && milestone) {
     const first = series.find((sr) => sr.name === players[0].name);
     first.markLine ??= { symbol: "none", silent: true, data: [] };
-    first.markLine.data.push({ yAxis: milestone, lineStyle: { color: "#ccc", type: "dashed" }, label: { show: false } });
+    first.markLine.data.push({ yAxis: milestone, lineStyle: { color: colors.faint, type: "dashed" }, label: { show: false } });
   }
 
   // the gain view starts at rated game 60 for both, so there's no long career to zoom past
@@ -801,6 +851,7 @@ function raceChartOption() {
   const gamesName = { rated: "Rated games played", unrated: "Unrated games played", both: "Games played" }[counted];
   return {
     animation: false,
+    textStyle: { color: colors.faint, fontFamily: getComputedStyle(document.body).fontFamily },
     grid: { left: 56, right: 150, top: 24, bottom: 64 },
     xAxis: {
       type: "value",
@@ -810,7 +861,9 @@ function raceChartOption() {
       nameLocation: "middle",
       nameGap: 28,
       splitLine: { show: false },
-      axisLabel: { formatter: (v) => v.toLocaleString("en-US") },
+      axisLabel: { formatter: (v) => v.toLocaleString("en-US"), color: colors.faint },
+      nameTextStyle: { color: colors.faint },
+      axisLine: { lineStyle: { color: colors.grid } },
     },
     yAxis: {
       type: "value",
@@ -819,7 +872,9 @@ function raceChartOption() {
       // room above the top line for its labels
       max: (v) => Math.ceil((v.max + 60) / 100) * 100,
       // faint horizontal gridlines only
-      splitLine: { lineStyle: { color: "#f0f0f0" } },
+      splitLine: { lineStyle: { color: colors.grid } },
+      axisLabel: { color: colors.faint },
+      nameTextStyle: { color: colors.faint },
     },
     tooltip: {
       trigger: "axis",
@@ -927,7 +982,9 @@ function renderClimb(container, who, { steps, summary }) {
   note("Lag = unrated level at the start of a step minus the official rating then.");
 }
 
-// yours only: the card, then how it moved over each window next to the official rating
+// yours only. from the stored 60 days: how it moved over the last 30 days next to the
+// official rating. with the full history: the card, and the 90-day, 1-year and all-time
+// windows too
 function renderShadow(players, now) {
   const container = document.getElementById("shadow");
   container.innerHTML = "";
@@ -939,12 +996,21 @@ function renderShadow(players, now) {
     container.appendChild(p);
     return;
   }
-  if (!me.records) return;
-  renderTile(container, shadowText(shadowSummary(me.records)), "race-card shadow");
+  const full = Boolean(me.journey);
+  if (!me.records?.length) {
+    const p = document.createElement("p");
+    p.className = "note";
+    p.textContent = `No ${current.timeClass} games saved in the last 60 days.`;
+    container.appendChild(p);
+    if (!full) container.appendChild(needsHistoryLine("Older windows: "));
+    return;
+  }
+  if (full) renderTile(container, shadowText(shadowSummary(me.records)), "race-card shadow");
 
   const r = (x) => String(Math.round(x));
   const move = (m) => `${r(m.start)} → ${r(m.now)} (${signed(Math.round(m.change))})`;
-  const rows = shadowWindows(me.records, now).map(({ label, result: w }) => {
+  const windows = shadowWindows(me.records, now).filter((w) => full || w.days === 30);
+  const rows = windows.map(({ label, result: w }) => {
     if (w.empty) return [label, "No games in this period", "", "", "", ""];
     if (w.noRated) return [label, "No rated games to start from", "", "", "", ""];
     return [
@@ -962,6 +1028,7 @@ function renderShadow(players, now) {
   p.textContent =
     "Each window starts from your last rated game before it, replays every game since, and compares where the shadow was when the window opened with where it is now.";
   container.appendChild(p);
+  if (!full) container.appendChild(needsHistoryLine("90 days, 1 year and all time: "));
 }
 
 // one paragraph per METHODOLOGY entry in performance.js and race.js
@@ -1022,6 +1089,9 @@ async function start() {
   const names = asked.filter((_, i) => !missing[i]);
   current = { primary, asked, names, pair: names.length === 2 ? names : null, timeClass: params.get("tc") };
 
+  // months that ended before the 60-day cutoff go, here as in the popup
+  await pruneOldMonths().catch((err) => console.warn("[Performance] prune failed:", err));
+
   // nothing about anyone shows before the first lock check
   status.textContent = "Checking for games in progress…";
   if (await checkLock()) return;
@@ -1038,7 +1108,7 @@ async function start() {
 
   const who = b ? `${sayName(a)} vs ${sayName(b)}` : sayName(a);
   status.textContent = `${who} · ${current.timeClass}`;
-  document.title = `${who} · Performance`;
+  document.title = `${who} · DualChess`;
   // with no b (or a b who doesn't exist), only the sections about a
   for (const id of ["prediction-section", "h2h-section", "race-section"]) document.getElementById(id).hidden = !current.pair;
   document.getElementById("player-1").hidden = !b;
@@ -1051,7 +1121,7 @@ async function start() {
 
   renderMethodology();
   await renderDetails();
-  if (names.length) loadHistories();
+  if (names.length) showRecent();
   else for (const id of ["states", "climb", "shadow"]) document.getElementById(id).innerHTML = "";
 }
 
@@ -1063,6 +1133,14 @@ for (const [id, field] of [["ctl-range", "range"], ["ctl-rated", "rated"]]) {
     if (!locked) renderDetails();
   });
 }
+// the chart's colors come from the css, so a switch between light and dark redraws it
+if (typeof matchMedia === "function") {
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => drawRaceChart());
+}
+// every "Load all games" button on the page does the same thing
+document.addEventListener("click", (e) => {
+  if (e.target.closest?.(".load-all")) loadAllGames();
+});
 for (const id of ["race-x", "race-view", "race-smoothed", "race-milestone", "race-counted"]) {
   document.getElementById(id).addEventListener("change", onRaceControl);
 }

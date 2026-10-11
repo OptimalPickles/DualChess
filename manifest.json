@@ -1,5 +1,5 @@
 {
-    "name": "Performance",
+    "name": "DualChess",
     "description" : "To accurately compare to chess.com users for current skill level",
     "version": "1.0",
     "manifest_version": 3,
@@ -18,6 +18,6 @@
         "48": "icons/rook-48.png",
         "128": "icons/rook-128.png"
     },
-    "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
+    "permissions": ["activeTab", "scripting", "storage"],
     "host_permissions": ["https://www.chess.com/*", "https://api.chess.com/*"]
 }

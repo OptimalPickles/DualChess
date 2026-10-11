@@ -35,12 +35,12 @@ test("today: a session that ended today, with how it compares to usual", () => {
   assert.equal(d.todayText(null, NOW), null);
 });
 
-test("shadow line from the 90-day window", () => {
+test("shadow line from the 30-day window", () => {
   const w = { shadow: { now: 2165.2, change: 40.4 }, official: { now: 2100 }, flags: ["Still settling"] };
   assert.deepEqual(d.shadowLine(w), {
-    text: "Shadow 2165 · +65 vs official · +40 in 90 days", level: "2165", rest: " · +65 vs official · +40 in 90 days", flags: ["Still settling"],
+    text: "Shadow 2165 · +65 vs official · +40 in 30 days", level: "2165", rest: " · +65 vs official · +40 in 30 days", flags: ["Still settling"],
   });
-  assert.equal(d.shadowLine({ shadow: { now: 1994, change: -33 }, official: { now: 2100 }, flags: [] }).text, "Shadow 1994 · −106 vs official · −33 in 90 days");
+  assert.equal(d.shadowLine({ shadow: { now: 1994, change: -33 }, official: { now: 2100 }, flags: [] }).text, "Shadow 1994 · −106 vs official · −33 in 30 days");
   assert.equal(d.shadowLine({ empty: true }), null);
   assert.equal(d.shadowLine(null), null);
 });
@@ -49,7 +49,7 @@ test("parts for bold bits: today's record, shadow number", () => {
   const s = { wdl: { w: 4, d: 1, l: 1 }, endTime: secs(0, 1), diff: 70 };
   assert.deepEqual(d.todayParts(s, NOW), { wdl: "4W 1D 1L", rest: " · 70 above your usual" });
   const sh = d.shadowLine({ shadow: { now: 2165, change: 40 }, official: { now: 2100 }, flags: [] });
-  assert.equal(sh.level + sh.rest, "2165 · +65 vs official · +40 in 90 days");
+  assert.equal(sh.level + sh.rest, "2165 · +65 vs official · +40 in 30 days");
 });
 
 // --- Compare view ---
@@ -98,7 +98,7 @@ test("anchor uses performance without the games against each other (the field ra
 
 test("score: 62% wins and 3% draws is 64% of points", () => {
   const games = [...Array(62).fill(1), ...Array(3).fill(0.5), ...Array(35).fill(0)].map((score, i) => ({ t: secs(1, i / 60), score, rated: false, oppPre: 1800 }));
-  const f = d.form90(games, NOW);
+  const f = d.recentForm(games, NOW);
   assert.equal(f.games, 100);
   const s = d.compareSummary({ names: ["You", "x"], perfs: [{ perf: 2000, form: f }, { perf: 1900, form: f }], h2h: null, gap: null });
   assert.equal(s.more.form[0], "You played 100 games and scored 64% of points");
@@ -127,7 +127,7 @@ test("lots of games together: the against section and a blended win chance", () 
   ];
   const h2h = { total: 693, aWins: 491, draws: 30, bWins: 172, last30: { total: 8, aWins: 5, draws: 1, bWins: 2 } };
   const s = d.compareSummary({ names: ["You", "legendary9000"], perfs, h2h, gap: { G: 136, error: 30 } });
-  assert.equal(s.against.title, "Against each other · 693 games");
+  assert.equal(s.against.title, "Against each other · last 60 days · 693 games");
   // same confidence, legendary9000 played rated more recently: they anchor. 1654 + 136
   assert.equal(s.against.levels.join(""), "You play at 1790 vs 1654 (±85)");
   assert.deepEqual(s.against.levels.filter((_, i) => i % 2), ["1790", "1654"]); // the bold parts
@@ -135,7 +135,7 @@ test("lots of games together: the against section and a blended win chance", () 
   assert.equal(s.against.scored.join(""), "You've scored 73% · expected 69%");
   assert.deepEqual(s.chance, { win: 67, draw: 4, loss: 29 });
   assert.equal(s.win, "Win chance: You 67% · draw 4% · legendary9000 29%");
-  assert.equal(s.basedOn, "Based on current performance and 693 games together");
+  assert.equal(s.basedOn, "Based on current performance and 693 games together in the last 60 days");
   assert.deepEqual(s.more.consistency, ["Your results swing more than luck explains", "legendary9000 is steady"]);
   assert.equal(s.more.against, "Last 30 days: 5.5–2.5 for you (8 games)");
   assert.equal(s.more.form[2], "Average opponent: 1800 for you, 1800 for them");

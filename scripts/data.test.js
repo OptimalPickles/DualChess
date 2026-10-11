@@ -7,6 +7,12 @@ const path = require("node:path");
 // data.js uses monthRecords, findGame etc as globals, like in the popup
 Object.assign(globalThis, require("./performance.js"), require("./fairplay.js"), require("./race.js"));
 
+// the clock stands still at noon on Mar 15, 2020. the 60-day cutoff is then Jan 15, so
+// 2020/01, 2020/02 and 2020/03 (the current month) are the window whatever day the tests run,
+// and anything from 2019 is before it
+const NOW = Date.UTC(2020, 2, 15, 12);
+Date.now = () => NOW;
+
 const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7).replace("-", "/");
 const CURRENT = utcMonth(Date.now());
 const API = "https://api.chess.com/pub/player";
@@ -406,7 +412,7 @@ test("one sync never asks for the same current month twice (5s freshness)", asyn
 
 // --- phase 2: fair play lock ---
 
-const PREVIOUS = (() => { const d = new Date(); return utcMonth(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)); })();
+const PREVIOUS = "2020/02";
 const livePage = (id) => ({ kind: "game", id, type: "live" });
 
 // me's current month has game 101 (finished). 202 is still being played
@@ -553,146 +559,184 @@ test("dataAsOf: the older of /stats and the current month, /stats alone if no ga
   data.restoreLog();
 });
 
-// --- step 1.5: storage limits ---
+// --- the 60-day window ---
 
-test("playersOfKey: whose data each key is", () => {
-  const data = openPopup(fakeStorage(), fakeServer({}));
+// me: one rated bullet game a month from 2019/11 on, two in 2020/01, all vs friend
+function windowRoutes() {
+  const g = (t, myRating, opts = {}) => rawGame(t, {
+    white: { username: "Me", result: "win", rating: myRating },
+    black: { username: "Friend", result: "resigned", rating: 2000 },
+    ...opts,
+  });
+  const at = (y, m, d) => Date.UTC(y, m - 1, d) / 1000;
+  return {
+    [`${API}/me/games/archives`]: { body: { archives: ["2019/11", "2019/12", "2020/01", "2020/02", CURRENT].map(monthUrl) }, etag: "a" },
+    [monthUrl("2019/11")]: { body: { games: [g(at(2019, 11, 5), 2070)] }, etag: "n" },
+    [monthUrl("2019/12")]: { body: { games: [g(at(2019, 12, 5), 2080)] }, etag: "d" },
+    [monthUrl("2020/01")]: { body: { games: [g(at(2020, 1, 5), 2092), g(at(2020, 1, 20), 2100)] }, etag: "j" },
+    [monthUrl("2020/02")]: { body: { games: [g(at(2020, 2, 5), 2108)] }, etag: "f" },
+    [monthUrl(CURRENT)]: { body: { games: [g(at(2020, 3, 5), 2115)] }, etag: "c" },
+  };
+}
+const monthKeys = (storage) => Object.keys(storage.store).filter((k) => /^month(Meta)?:/.test(k)).sort();
+
+test("window: on Oct 10 it keeps Aug, Sep, Oct; on Nov 1 it keeps Sep, Oct, Nov", async () => {
+  const storage = fakeStorage();
+  const data = openPopup(storage, fakeServer({}));
+  const months = ["2026/07", "2026/08", "2026/09", "2026/10", "2026/11"];
+  const oct10 = Date.UTC(2026, 9, 10);
+  const nov1 = Date.UTC(2026, 10, 1);
+  assert.equal(data.windowStartMonth(oct10), "2026/08");
+  assert.equal(data.windowStartMonth(nov1), "2026/09");
+
+  const stored = async () => Object.keys(storage.store).map((k) => k.split(":")[2]).sort();
+  for (const m of months.slice(0, 4)) storage.store[`month:me:${m}`] = { games: [] };
+  await data.pruneOldMonths(oct10);
+  assert.deepEqual(await stored(), ["2026/08", "2026/09", "2026/10"]);
+  storage.store["month:me:2026/11"] = { games: [] };
+  await data.pruneOldMonths(nov1);
   data.restoreLog();
-  assert.deepEqual(data.playersOfKey("month:me:2020/01"), ["me"]);
-  assert.deepEqual(data.playersOfKey("monthMeta:me:2020/01"), ["me"]);
-  assert.deepEqual(data.playersOfKey("archives:me"), ["me"]);
-  assert.deepEqual(data.playersOfKey("stats:me"), ["me"]);
-  assert.deepEqual(data.playersOfKey("rev:me"), ["me"]);
-  assert.deepEqual(data.playersOfKey("derived:pre:me"), ["me"]);
-  assert.deepEqual(data.playersOfKey("derived:h2h:me:friend"), ["me", "friend"]);
-  assert.deepEqual(data.playersOfKey("primaryUsername"), []);
-  assert.deepEqual(data.playersOfKey("perfSettings"), []);
+  assert.deepEqual(await stored(), ["2026/09", "2026/10", "2026/11"]);
 });
 
-test("eviction: 31 days unviewed -> removed, 29 kept, the primary never, settings untouched", async () => {
+test("prune: a month that ended before the cutoff goes, with its meta and derived entries; one partly inside stays", async () => {
   const storage = fakeStorage();
-  const now = Date.now();
-  const daysAgo = (d) => now - d * 86400 * 1000;
+  // the cutoff is Jan 15: december ended before it, january is partly inside
   const playerKeys = (n) => ({
-    [`month:${n}:2020/01`]: { games: [] }, [`monthMeta:${n}:2020/01`]: { final: true },
-    [`archives:${n}`]: { months: [] }, [`stats:${n}`]: { stats: {} }, [`derived:pre:${n}`]: { ends: {} },
+    [`month:${n}:2019/12`]: { games: [1] }, [`monthMeta:${n}:2019/12`]: { final: true },
+    [`month:${n}:2020/01`]: { games: [2] }, [`monthMeta:${n}:2020/01`]: { final: true },
+    [`month:${n}:${CURRENT}`]: { games: [3] }, [`monthMeta:${n}:${CURRENT}`]: { final: false },
+    [`archives:${n}`]: { months: ["2019/12", "2020/01", CURRENT] }, [`stats:${n}`]: { stats: {} },
+    [`derived:pre:${n}`]: { rev: 0, ends: { "2019/12": { bullet: 2080 }, "2020/01": { bullet: 2100 } } },
   });
-  Object.assign(storage.store, playerKeys("me"), playerKeys("old"), playerKeys("recent"), {
-    "derived:h2h:me:old": { months: {} }, "derived:h2h:me:recent": { months: {} },
+  Object.assign(storage.store, playerKeys("me"), playerKeys("friend"), {
+    "derived:h2h:me:friend": { revs: "pre:0:0", months: { "2019/12": [{ t: 1 }], "2020/01": [{ t: 2 }] } },
     primaryUsername: "me", perfSettings: { time: "auto" },
-    lastViewed: { me: daysAgo(90), old: daysAgo(31), recent: daysAgo(29) },
   });
+  const before = Object.keys(storage.store).length;
   const data = openPopup(storage, fakeServer({}));
-  const evicted = await data.evictStalePlayers("me");
+  assert.equal(await data.pruneOldMonths(), 4); // two players x (month + meta)
+  assert.equal(await data.pruneOldMonths(), 0); // nothing left to take
   data.restoreLog();
-  assert.deepEqual(evicted, ["old"]);
-  const keys = Object.keys(storage.store);
-  assert.ok(!keys.some((k) => k.includes("old")), keys.join(", ")); // incl. the h2h vs old
-  assert.ok(keys.includes("month:me:2020/01")); // primary, even at 90 days
-  assert.ok(keys.includes("derived:h2h:me:recent"));
-  assert.ok(keys.includes("perfSettings") && keys.includes("primaryUsername"));
-  assert.equal(storage.store.lastViewed.old, undefined);
+
+  assert.deepEqual(monthKeys(storage), ["me", "friend"].flatMap((n) =>
+    [`month:${n}:2020/01`, `month:${n}:${CURRENT}`, `monthMeta:${n}:2020/01`, `monthMeta:${n}:${CURRENT}`]).sort());
+  assert.deepEqual(storage.store["month:me:2020/01"], { games: [2] });
+  assert.deepEqual(storage.store["derived:pre:me"].ends, { "2020/01": { bullet: 2100 } });
+  assert.deepEqual(Object.keys(storage.store["derived:h2h:me:friend"].months), ["2020/01"]);
+  // nothing else was touched
+  assert.equal(Object.keys(storage.store).length, before - 4);
+  assert.ok(storage.store["stats:friend"] && storage.store["archives:friend"] && storage.store.perfSettings);
 });
 
-test("eviction: data with no lastViewed yet (from before this existed) gets 30 days, not deleted", async () => {
+test("only the months in the window are fetched and stored", async () => {
   const storage = fakeStorage();
-  Object.assign(storage.store, { "month:legacy:2020/01": { games: [] }, "stats:legacy": { stats: {} } });
-  const data = openPopup(storage, fakeServer({}));
-  assert.deepEqual(await data.evictStalePlayers("me"), []);
+  const server = fakeServer(windowRoutes());
+  const data = openPopup(storage, server);
+  const games = await data.fetchPlayerGames("me", () => true); // what sync does
+  const h = await data.fetchHeadToHead("me", "friend");
   data.restoreLog();
-  assert.ok(storage.store["month:legacy:2020/01"]);
-  assert.ok(Date.now() - storage.store.lastViewed.legacy < 5000);
+  const asked = server.requests.map((r) => r.url.replace(API, "")).filter((u) => /\/games\/\d/.test(u)).sort();
+  assert.deepEqual(asked, ["/me/games/2020/01", "/me/games/2020/02", `/me/games/${CURRENT}`]);
+  assert.deepEqual(monthKeys(storage).filter((k) => k.startsWith("month:")),
+    ["month:me:2020/01", "month:me:2020/02", `month:me:${CURRENT}`]);
+  assert.equal(games.length, 4);
+  assert.equal(h.total, 4); // the head-to-head of the last 60 days
 });
 
-test("markViewed + maintain: rechecks old months only for the primary and players still kept", async () => {
+test("the first rated game in the window has no pre-game numbers and is left out, with no extra month fetched", async () => {
+  const server = fakeServer(windowRoutes());
+  const data = openPopup(fakeStorage(), server);
+  const games = await data.fetchPlayerGames("me", () => true);
+  const h = await data.fetchHeadToHead("me", "friend");
+  data.restoreLog();
+  const oldestFirst = [...games].sort((x, y) => x.t - y.t);
+  // jan 5 is the first rated game stored: december's 2080 isn't known here
+  assert.deepEqual([oldestFirst[0].rating, oldestFirst[0].myPre, oldestFirst[0].oppPre], [2092, null, null]);
+  assert.deepEqual(oldestFirst.slice(1).map((g) => g.myPre), [2092, 2100, 2108]);
+  // everything that needs myPre / oppPre goes through this filter
+  assert.deepEqual(rateable(games).map((g) => g.rating).sort(), [2100, 2108, 2115]);
+  assert.equal(h.vsRatings.games, 3);
+  assert.ok(!server.requests.some((r) => r.url.includes("/2019/")));
+});
+
+test("load all games: the full history comes back, and storage holds nothing older than the cutoff", async () => {
+  const storage = fakeStorage();
+  const server = fakeServer(windowRoutes());
+  let data = openPopup(storage, server);
+  await data.fetchPlayerGames("me", () => true); // the popup was open first
+  const progress = [];
+  const { games, missingMonths } = await data.fetchPlayerHistory("me", "bullet", (done, total) => progress.push(`${done}/${total}`), { preGame: true });
+  assert.deepEqual(games.map((g) => g.rating), [2070, 2080, 2092, 2100, 2108, 2115]);
+  assert.deepEqual(missingMonths, []);
+  assert.equal(progress.at(-1), "5/5");
+  assert.equal(server.maxInFlight() <= 3, true);
+  // with december loaded, january's first game knows the rating before it
+  assert.deepEqual(games.map((g) => g.myPre), [null, 2070, 2080, 2092, 2100, 2108]);
+
+  // the all-time head-to-head, from memory, with no more requests
+  const before = server.requests.length;
+  const all = await data.fetchHeadToHead("me", "friend", () => {}, { cacheOnly: true, full: true });
+  const recent = await data.fetchHeadToHead("me", "friend", () => {}, { cacheOnly: true });
+  assert.deepEqual([all.total, recent.total], [6, 4]);
+  assert.equal((await data.fetchMonth("me", "2019/12", { cacheOnly: true })).length, 1);
+  assert.equal(server.requests.length, before);
+  data.restoreLog();
+
+  const start = data.windowStartMonth();
+  assert.deepEqual(monthKeys(storage).filter((k) => k.split(":")[2] < start), []);
+  assert.deepEqual(Object.keys(storage.store["derived:pre:me"].ends).filter((m) => m < start), []);
+  assert.deepEqual(Object.keys(storage.store["derived:h2h:me:friend"]?.months ?? {}).filter((m) => m < start), []);
+  assert.ok(!Object.keys(storage.store).some((k) => k.startsWith("derived:journey")));
+  assert.ok(!JSON.stringify(storage.store).includes("2070")); // november's game is nowhere in storage
+
+  // a new page starts without the old months
+  data = openPopup(storage, server);
+  assert.equal(await data.fetchMonth("me", "2019/12", { cacheOnly: true }), undefined);
+  data.restoreLog();
+});
+
+test("estimateHistory: counts the months before the window, sized from the stored ones", async () => {
+  const storage = fakeStorage();
+  const data = openPopup(storage, fakeServer(windowRoutes()));
+  await data.fetchPlayerGames("me", () => true);
+  const e = await data.estimateHistory("me");
+  // 4 games in 3 stored months, 2 months to download
+  assert.deepEqual([e.months, e.missingMonths, e.games], [5, 2, Math.round((4 / 3) * 2)]);
+  await data.fetchPlayerHistory("me", "bullet");
+  assert.equal((await data.estimateHistory("me")).missingMonths, 0); // already in memory
+  data.restoreLog();
+});
+
+test("maintain: rechecks finished months of everyone in storage, with their etags", async () => {
   const storage = fakeStorage();
   const server = fakeServer(twoPlayerRoutes());
   let data = openPopup(storage, server);
   await data.fetchPlayerGames("me", () => true);
-  await data.fetchHeadToHead("me", "friend");
   await data.fetchPlayerGames("friend", () => true);
-  await data.markViewed(["me", "Friend"]);
   data.restoreLog();
-  // both players' old months were last checked 31 days ago, friend last viewed 31 days ago
   for (const [k, v] of Object.entries(storage.store)) if (k.startsWith("monthMeta:")) v.checkedAt = Date.now() - 31 * 86400 * 1000;
-  storage.store.lastViewed.friend = Date.now() - 31 * 86400 * 1000;
 
   data = openPopup(storage, server);
   const before = server.requests.length;
-  const { evicted, changed } = await data.maintain("me");
+  const { changed } = await data.maintain();
   data.restoreLog();
-  assert.deepEqual(evicted, ["friend"]);
   assert.deepEqual(changed, []);
-  const rechecked = server.requests.slice(before).map((r) => r.url.replace(API, ""));
-  assert.ok(rechecked.length > 0 && rechecked.every((u) => u.startsWith("/me/")), rechecked.join(", "));
+  const rechecked = server.requests.slice(before);
+  assert.deepEqual(rechecked.map((r) => r.url.replace(API, "")).sort(),
+    ["/friend/games/2020/02", "/me/games/2020/01", "/me/games/2020/02"]);
+  assert.ok(rechecked.every((r) => r.sentEtag));
 });
 
-// --- race: journey as a derived cache ---
-
-// me's bullet games: 70 rated in 2020/01, a climb in 2020/02, a few more this month
-function journeyRoutes() {
-  let n = 0;
-  const g = (t, rating, opts = {}) => rawGame(t, {
-    url: `https://www.chess.com/game/live/${++n}`, time_class: "bullet",
-    white: { username: "Me", result: "win", rating }, black: { username: "Friend", result: "resigned", rating: 1500 },
-    ...opts,
+test("migration v2: the journey cache and the eviction list go, months are left to the prune", async () => {
+  const storage = fakeStorage();
+  Object.assign(storage.store, {
+    storeVersion: 1, lastViewed: { me: 1 }, "derived:journey:me:bullet": { state: {} },
+    "month:me:2019/01": { games: [] }, "derived:pre:me": { ends: {} }, perfSettings: {},
   });
-  const jan = Array.from({ length: 70 }, (_, i) => g(1577836800 + i * 3600, 1500 + (i % 3)));
-  const feb = Array.from({ length: 40 }, (_, i) => g(1580515200 + i * 3600, 1500 + i * 15));
-  const nowS = Math.floor(Date.now() / 1000);
-  const cur = [g(nowS - 7200, 2090), g(nowS - 3600, 2110), g(nowS - 1800, 2105, { rated: false })];
-  return {
-    [`${API}/me/games/archives`]: { body: { archives: ["2020/01", "2020/02", CURRENT].map(monthUrl) }, etag: "a" },
-    [monthUrl("2020/01")]: { body: { games: jan }, etag: "j" },
-    [monthUrl("2020/02")]: { body: { games: feb }, etag: "f" },
-    [monthUrl(CURRENT)]: { body: { games: cur }, etag: "c" },
-  };
-}
-
-test("journey cache: saved through the last finished month, reopen only adds the current month", async () => {
-  const storage = fakeStorage();
-  const server = fakeServer(journeyRoutes());
-  let data = openPopup(storage, server);
-  const first = await data.fetchJourney("me", "bullet");
+  const data = openPopup(storage, fakeServer({}));
+  await data.migrateStorage();
   data.restoreLog();
-  const cached = storage.store["derived:journey:me:bullet"];
-  assert.equal(cached.through, "2020/02");
-  assert.equal(cached.state.ratedCount, 110); // jan + feb, not the current month
-  assert.deepEqual([first.ratedCount, first.unratedCount], [112, 1]);
-
-  // the same answer as folding every game from scratch
-  const all = [];
-  for (const m of ["2020/01", "2020/02", CURRENT]) all.push(...(await openPopup(storage, server).fetchMonth("me", m, { cacheOnly: true })));
-  const { rated, ...scratch } = journeyOf(all, Date.now());
-  const { missingMonths, ...fromCache } = first;
-  delete scratch.currentDay; delete fromCache.currentDay; delete fromCache.rated;
-  assert.deepEqual(fromCache, scratch);
-
-  // reopen 10s later: only the current month is checked (a 304)
-  age(storage, 10000);
-  const before = server.requests.length;
-  data = openPopup(storage, server);
-  const again = await data.fetchJourney("me", "bullet");
-  data.restoreLog();
-  const urls = server.requests.slice(before).map((r) => r.url.replace(API, ""));
-  assert.deepEqual(urls.filter((u) => /\/games\/\d/.test(u)), [`/me/games/${CURRENT}`]);
-  assert.equal(again.ratedCount, 112);
-});
-
-test("journey cache: a rev change rebuilds it, a failed month stops the save point", async () => {
-  const storage = fakeStorage();
-  const routes = journeyRoutes();
-  delete routes[monthUrl("2020/02")];
-  let data = openPopup(storage, fakeServer(routes));
-  const j = await data.fetchJourney("me", "bullet");
-  data.restoreLog();
-  assert.deepEqual(j.missingMonths, ["2020/02"]);
-  assert.equal(storage.store["derived:journey:me:bullet"].through, "2020/01"); // not past the gap
-
-  storage.store["rev:me"] = 1; // an old month was corrected
-  data = openPopup(storage, fakeServer(journeyRoutes()));
-  await data.fetchJourney("me", "bullet");
-  data.restoreLog();
-  const after = storage.store["derived:journey:me:bullet"];
-  assert.deepEqual([after.rev, after.through], [1, "2020/02"]);
+  assert.deepEqual(Object.keys(storage.store).sort(), ["derived:pre:me", "month:me:2019/01", "perfSettings", "storeVersion"]);
+  assert.equal(storage.store.storeVersion, 2);
 });

@@ -103,7 +103,7 @@ async function loadPerformance(username, data, now, settings, timeClass, opponen
   const opts = { timeClass, rated: settings.rated };
   const range = parseRange(settings.range);
 
-  // the newest 6 months, from storage. the popup's sync keeps all 6 loaded, so any range,
+  // the last 60 days, from storage. the popup's sync keeps them loaded, so any range,
   // time class, or rated setting works without a request. null = not loaded yet
   const all = await fetchPlayerGames(username, () => true, { cacheOnly: true });
   if (!all) return null;
@@ -150,8 +150,8 @@ async function loadPerformance(username, data, now, settings, timeClass, opponen
     stability: stab,
     lastEndTime: lastActivity,
     lastRatedT,
-    // last 90 days in this time class, rated and unrated, every opponent
-    form: form90(filterGames(all, { timeClass, rated: "all" }), now),
+    // last 60 days in this time class, rated and unrated, every opponent
+    form: recentForm(filterGames(all, { timeClass, rated: "all" }), now),
     official: data?.stats?.[`chess_${timeClass}`]?.last?.rating ?? null,
     session,
     field: opponent ? fieldRating(all, opts, range, now, timeClass, opponent) : null,
@@ -164,8 +164,8 @@ async function loadPerformance(username, data, now, settings, timeClass, opponen
 }
 
 // how they play against everyone except the other player: the same time class and range,
-// without the games between the two (so the head-to-head can't feed its own anchor). the 6
-// months already loaded are what "extend back if needed" draws on for a games range
+// without the games between the two (so the head-to-head can't feed its own anchor). the
+// stored 60 days are what "extend back if needed" draws on for a games range
 function fieldRating(all, opts, range, now, timeClass, opponent) {
   const name = opponent.toLowerCase();
   const games = applyRange(filterGames(all.filter((g) => g.opponent !== name), opts), range, now);
@@ -275,13 +275,14 @@ function todayText(session, now) {
   return t && `Today: ${t.wdl}${t.rest}`;
 }
 
-// "Shadow 2165 · +65 vs official · +40 in 90 days" from the 90-day window, plus its flags
-function shadowLine(w) {
+// "Shadow 2165 · +65 vs official · +40 in 30 days" from the window of that many days, plus
+// its flags
+function shadowLine(w, days = 30) {
   if (!w || w.empty || w.noRated) return null;
   const r = Math.round;
   // level and rest are the same line in parts, so the number can be bold
   const level = String(r(w.shadow.now));
-  const rest = ` · ${signedMinus(r(w.shadow.now - w.official.now))} vs official · ${signedMinus(r(w.shadow.change))} in 90 days`;
+  const rest = ` · ${signedMinus(r(w.shadow.now - w.official.now))} vs official · ${signedMinus(r(w.shadow.change))} in ${days} days`;
   return { text: `Shadow ${level}${rest}`, level, rest, flags: w.flags };
 }
 
@@ -289,12 +290,12 @@ function shadowLine(w) {
 
 const AGAINST_MIN_GAMES = 5; // fewer games together than this: no "Against each other" section
 const BLEND_GAMES = 30; // the head-to-head counts for half the gap at 30 games together
-const FORM_DAYS = 90;
+const FORM_DAYS = 60; // everything stored: the 60-day window
 const CONF_RANK = { Low: 0, Medium: 1, High: 2 };
 
-// last 90 days, all opponents, as numbers. games: one time class, rated and unrated, any order.
+// last 60 days, all opponents, as numbers. games: one time class, rated and unrated, any order.
 // score counts a draw as half a point. peak = highest rating after a rated game
-function form90(games, now) {
+function recentForm(games, now) {
   const since = now / 1000 - FORM_DAYS * 86400;
   const recent = games.filter((g) => g.t >= since);
   const t = wdl(recent);
@@ -394,7 +395,7 @@ function consistencyText(name, st) {
 // everything the Compare view says, from the left player's side. pure, so it's tested as is.
 //   names: ["You", "legendary9000"] (or two usernames when spectating)
 //   perfs: [{ perf, official, conf, stability, lastRatedT, field, form }] (loadPerformance)
-//   h2h: the filtered head-to-head ({ total, aWins, draws, bWins, last30 }), or null
+//   h2h: the filtered head-to-head of the last 60 days ({ total, aWins, draws, bWins, last30 }), or null
 //   gap: matchupGap() of the head-to-head games, or null
 function compareSummary({ names, perfs, h2h, gap }) {
   const [a, b] = perfs;
@@ -408,7 +409,7 @@ function compareSummary({ names, perfs, h2h, gap }) {
   const g = currentGap == null ? (together ? gap.G : null) : blendedGap(together ? n : 0, gap?.G, currentGap);
   const expected = g == null ? null : 1 / (1 + Math.pow(10, -g / 400));
 
-  // draw rate: both players' last 90 days averaged, or whoever has games
+  // draw rate: both players' last 60 days averaged, or whoever has games
   const rates = perfs.map((p) => p?.form?.drawRate).filter((x) => x != null);
   const drawRate = rates.length ? rates.reduce((x, y) => x + y, 0) / rates.length : 0;
   const chance = expected == null ? null : winChance(expected, drawRate);
@@ -420,7 +421,7 @@ function compareSummary({ names, perfs, h2h, gap }) {
     const scored = (h2h.aWins + h2h.draws / 2) / n;
     // parts: every odd one is bold
     against = {
-      title: `Against each other · ${plural(n, "game")}`,
+      title: `Against each other · last ${FORM_DAYS} days · ${plural(n, "game")}`,
       levels: m && [`${you ? "You play" : `${names[0]} plays`} at `, String(r(m.levels[0])), " vs ", String(r(m.levels[1])), ` (±${r(m.error)})`],
       scored: [`${you ? "You've" : `${names[0]} has`} scored `, pct(scored), expected == null ? "" : ` · expected ${pct(expected)}`],
     };
@@ -452,7 +453,7 @@ function compareSummary({ names, perfs, h2h, gap }) {
     against,
     chance,
     win: chance && `Win chance: ${names[0]} ${chance.win}% · draw ${chance.draw}% · ${names[1]} ${chance.loss}%`,
-    basedOn: n >= AGAINST_MIN_GAMES ? `Based on current performance and ${plural(n, "game")} together` : "Based on current performance",
+    basedOn: n >= AGAINST_MIN_GAMES ? `Based on current performance and ${plural(n, "game")} together in the last ${FORM_DAYS} days` : "Based on current performance",
     more: {
       form: [
         played(names[0], a?.form, true),
@@ -473,7 +474,7 @@ if (typeof RACE_CONFIG === "undefined" && typeof require !== "undefined") {
 if (typeof module !== "undefined") {
   module.exports = {
     currentLevel, officialText, inactiveText, todayText, todayParts, shadowLine,
-    form90, blendedGap, winChance, pickAnchor, matchupLevels, leadOf, leadParts, consistencyText, compareSummary,
+    recentForm, blendedGap, winChance, pickAnchor, matchupLevels, leadOf, leadParts, consistencyText, compareSummary,
     signedMinus, stabilityText, parseRange, rangeLabel, timeAgo, fieldRating,
   };
 }

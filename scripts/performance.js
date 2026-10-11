@@ -7,8 +7,8 @@ const PERF_CONFIG = {
   sessionGapMinutes: 30,
   sessionMinGames: 3,
   sessionMaxAgeHours: 12,
-  // stability check: sessions from the last 90 days with 5+ games
-  stabilityWindowDays: 90,
+  // stability check: sessions from the last 60 days (everything stored) with 5+ games
+  stabilityWindowDays: 60,
   stabilityMinSessionGames: 5,
   stabilityMinSessions: 3,
   // ratio at or under this = fully stable, at or over shifting = not stable at all
@@ -226,7 +226,7 @@ function applyRange(games, range, now) {
 }
 
 // one { perf, error } per session, for the stability check.
-// same filters as the card, last 90 days, sessions with 5+ games.
+// same filters as the card, last 60 days, sessions with 5+ games.
 // excludeOpponent drops games vs that player (so h2h doesn't feed itself)
 function sessionPerformances(games, opts, now, excludeOpponent = null) {
   let recent = applyRange(

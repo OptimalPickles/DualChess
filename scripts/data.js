@@ -46,17 +46,31 @@ async function fetchJson(url, etag = null) {
 // meta is its own key so picking months to recheck doesn't load every game,
 // and so two months of the same player can be saved at once without clobbering each other.
 // { cacheOnly: true } on any fetcher = answer from storage, never touch the network
+//
+// only the months that overlap the last 60 days are stored (2 or 3 of them). an older month
+// is only ever asked for by "Load all games" on the comparison page, and then it's kept in
+// memory for as long as that page is open and never written to storage
 
 const DAY_MS = 86400 * 1000;
 const REVALIDATE_MAX_MONTHS = 3;
 const REVALIDATE_EVERY_DAYS = 30;
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
+const WINDOW_DAYS = 60;
 // chess.com's own cache-control max-age on months and /stats. a copy we got in the last
 // 5s is as fresh as theirs, so one sync never asks for the same thing twice
 const FRESH_MS = 5000;
 
 // "YYYY/MM" in UTC, like the archive urls
 const utcMonth = (ms) => new Date(ms).toISOString().slice(0, 7).replace("-", "/");
+
+// the oldest month that still overlaps the last 60 days: on Oct 10 that's August (the
+// cutoff is Aug 11), on Nov 1 it's September
+const windowStartMonth = (now = Date.now()) => utcMonth(now - WINDOW_DAYS * DAY_MS);
+const inWindow = (month, now = Date.now()) => month >= windowStartMonth(now);
+
+// months from before the window, "<name>:<YYYY/MM>" -> records (null = chess.com failed).
+// gone when the page closes
+const memoryMonths = new Map();
 
 // same url asked for twice at once -> both get the one pending request
 const inflight = new Map();
@@ -109,7 +123,7 @@ async function fetchArchives(username, { cacheOnly = false } = {}) {
 }
 
 // one month of records, or null if it can't be loaded and was never cached.
-// finished months are downloaded once. anything else is rechecked with its etag.
+// finished months in the window are downloaded once. the current one is rechecked with its etag.
 // cacheOnly: the cached records, null if chess.com failed us before (known missing),
 // or undefined if we've simply never loaded it (so the caller knows it's incomplete)
 async function fetchMonth(username, month, { cacheOnly = false } = {}) {
@@ -117,6 +131,20 @@ async function fetchMonth(username, month, { cacheOnly = false } = {}) {
   const url = `${API}/${encodeURIComponent(name)}/games/${month}`;
   const key = `month:${name}:${month}`;
   const metaKey = `monthMeta:${name}:${month}`;
+
+  // before the window: memory only. never read from or written to storage
+  if (!inWindow(month)) {
+    const memKey = `${name}:${month}`;
+    if (memoryMonths.has(memKey)) return memoryMonths.get(memKey);
+    if (cacheOnly) return undefined;
+    return shared(url, async () => {
+      const res = await inMonthSlot(() => fetchJson(url));
+      const games = res.data ? monthRecords(res.data.games, name) : null;
+      memoryMonths.set(memKey, games);
+      return games;
+    });
+  }
+
   if (cacheOnly) {
     const stored = await chrome.storage.local.get([key, metaKey]);
     if (stored[key]) return stored[key].games;
@@ -175,7 +203,7 @@ async function revalidateFinishedMonths(usernames) {
     const stored = await chrome.storage.local.get(months.map((m) => `monthMeta:${name}:${m}`));
     for (const month of months) {
       const meta = stored[`monthMeta:${name}:${month}`];
-      if (meta) metas.push({ name, month, ...meta });
+      if (meta && inWindow(month)) metas.push({ name, month, ...meta });
     }
   }
 
@@ -216,79 +244,45 @@ async function getRevision(username) {
 }
 
 // --- storage upkeep ---
-// lastViewed = { name: ms } for every player shown. players not viewed in 30 days lose
-// their months and derived caches (they're rebuilt if viewed again). never the primary user
-const EVICT_AFTER_DAYS = 30;
 
-// which players a storage key belongs to. an h2h cache belongs to both
-function playersOfKey(key) {
-  const parts = key.split(":");
-  switch (parts[0]) {
-    case "month":
-    case "monthMeta":
-    case "archives":
-    case "stats":
-    case "rev":
-      return [parts[1]];
-    case "derived":
-      return parts[1] === "h2h" ? [parts[2], parts[3]] : [parts[2]];
-    default:
-      return [];
-  }
-}
-
-// players whose last view is more than 30 days old, never the primary user
-function pickPlayersToEvict(names, lastViewed, primary, now) {
-  const cutoff = now - EVICT_AFTER_DAYS * DAY_MS;
-  return names.filter((n) => n !== primary && lastViewed[n] != null && lastViewed[n] < cutoff);
-}
-
-async function markViewed(usernames) {
-  const viewed = (await chrome.storage.local.get("lastViewed")).lastViewed || {};
-  const now = Date.now();
-  for (const u of usernames) if (u) viewed[u.toLowerCase()] = now;
-  await chrome.storage.local.set({ lastViewed: viewed });
-}
-
-// returns the evicted names
-async function evictStalePlayers(primary) {
+const storageKeys = async () =>
   // getKeys lists keys without loading every month into memory (chrome 130+)
-  const keys = chrome.storage.local.getKeys
-    ? await chrome.storage.local.getKeys()
-    : Object.keys(await chrome.storage.local.get(null));
-  const owners = new Map(keys.map((k) => [k, playersOfKey(k)]));
-  const names = [...new Set([...owners.values()].flat())];
-  const viewed = (await chrome.storage.local.get("lastViewed")).lastViewed || {};
-  const now = Date.now();
+  chrome.storage.local.getKeys ? chrome.storage.local.getKeys() : Object.keys(await chrome.storage.local.get(null));
 
-  // data from before lastViewed existed starts its 30 days now, instead of vanishing at once
-  let stamped = false;
-  for (const n of names) {
-    if (viewed[n] == null) {
-      viewed[n] = now;
-      stamped = true;
-    }
+// drops every stored month that ended before the 60-day cutoff, with its meta, and takes
+// those months out of the derived caches built from them. a month that's still partly
+// inside the window is never touched. run on startup and after each refresh.
+// returns how many keys went
+async function pruneOldMonths(now = Date.now()) {
+  const start = windowStartMonth(now);
+  const keys = await storageKeys();
+  const doomed = keys.filter((k) => {
+    const [kind, , month] = k.split(":");
+    return (kind === "month" || kind === "monthMeta") && month < start;
+  });
+
+  // derived:pre keeps month-end ratings in .ends, derived:h2h keeps games per month in .months
+  const derived = keys.filter((k) => k.startsWith("derived:pre:") || k.startsWith("derived:h2h:"));
+  const stored = derived.length ? await chrome.storage.local.get(derived) : {};
+  const trimmed = {};
+  for (const [key, cache] of Object.entries(stored)) {
+    const byMonth = key.startsWith("derived:pre:") ? cache?.ends : cache?.months;
+    const old = Object.keys(byMonth ?? {}).filter((m) => m < start);
+    for (const m of old) delete byMonth[m];
+    if (old.length) trimmed[key] = cache;
   }
 
-  const evict = new Set(pickPlayersToEvict(names, viewed, primary?.toLowerCase(), now));
-  const doomed = keys.filter((k) => owners.get(k).some((n) => evict.has(n)));
-  for (const n of evict) delete viewed[n];
   if (doomed.length) await chrome.storage.local.remove(doomed);
-  if (evict.size || stamped) await chrome.storage.local.set({ lastViewed: viewed });
-  if (evict.size) console.log(`[Performance] evicted ${[...evict].join(", ")} (${doomed.length} keys)`);
-  return [...evict];
+  if (Object.keys(trimmed).length) await chrome.storage.local.set(trimmed);
+  if (doomed.length) console.log(`[Performance] pruned ${doomed.length} keys from before ${start}`);
+  return doomed.length;
 }
 
-// background upkeep, once everything is on screen: drop players not viewed in 30 days,
-// then recheck a few old months for the primary user and anyone viewed recently.
-// returns { evicted, changed }, changed = players whose old months turned out different
-async function maintain(primary) {
-  const evicted = await evictStalePlayers(primary);
-  const viewed = (await chrome.storage.local.get("lastViewed")).lastViewed || {};
-  const players = Object.keys(viewed);
-  if (primary && !players.includes(primary.toLowerCase())) players.push(primary.toLowerCase());
-  const changed = await revalidateFinishedMonths(players);
-  return { evicted, changed };
+// background upkeep, once everything is on screen: recheck a few finished months of
+// everyone in storage. returns { changed }, the players whose months turned out different
+async function maintain() {
+  const names = new Set((await storageKeys()).filter((k) => k.startsWith("monthMeta:")).map((k) => k.split(":")[1]));
+  return { changed: await revalidateFinishedMonths([...names]) };
 }
 
 // one-time cleanup of the old per-feature caches, now that months live in one place
@@ -296,7 +290,8 @@ async function migrateStorage() {
   const { storeVersion } = await chrome.storage.local.get("storeVersion");
   if (storeVersion === STORE_VERSION) return;
   const all = await chrome.storage.local.get(null);
-  const old = Object.keys(all).filter((k) => /^(h2h|games|history):/.test(k));
+  // v2: the journey cache and the 30-day eviction list went with the 60-day window
+  const old = Object.keys(all).filter((k) => /^(h2h|games|history|derived:journey):/.test(k) || k === "lastViewed");
   await chrome.storage.local.remove(old);
   await chrome.storage.local.set({ storeVersion: STORE_VERSION });
   console.log(`[Performance] storage migrated, removed ${old.length} old keys`);
@@ -342,6 +337,9 @@ async function playerMissing(username) {
 }
 
 // --- pre-game ratings over the month store ---
+// the month before the window isn't stored, so the ratings going into the window's first
+// month aren't known: the first rated game in the window (per time class) gets no pre-game
+// numbers and is left out of everything that needs them. no extra month is fetched for it
 // derived cache derived:pre:<name> = { rev, ends: { "YYYY/MM": { bullet: 2100, ... } } }:
 // the last rated rating per time class at the end of each finished month, so the first
 // game of any month knows the rating before it. tagged with rev like derived:h2h
@@ -359,7 +357,7 @@ async function monthEndState(name, month, months, cache, current) {
       ? await monthEndState(name, months[i - 1], months, cache, current)
       : { state: {}, complete: i === 0 };
   const state = { ...before.state, ...lastRatedByTimeClass(records) };
-  if (before.complete && month < current) cache.ends[month] = state;
+  if (before.complete && month < current && inWindow(month)) cache.ends[month] = state;
   return { state, complete: before.complete };
 }
 
@@ -387,7 +385,7 @@ async function withPreGame(username, months, byMonth) {
     const { records, end } = preGamePass(byMonth[month], start.state);
     out[month] = { records, complete: start.complete };
     carry = { month, end: { state: end, complete: start.complete } };
-    if (start.complete && month < current) cache.ends[month] = end;
+    if (start.complete && month < current && inWindow(month)) cache.ends[month] = end;
   }
   await chrome.storage.local.set({ [key]: cache });
   return out;
@@ -446,11 +444,11 @@ function flipSide(r, other) {
   };
 }
 
-// every game between a and b, read from a's months (every game between them is in a's
-// archive). only falls back to b's month if a's won't load.
+// every game between a and b in the last 60 days (full: ever), read from a's months (every
+// game between them is in a's archive). only falls back to b's month if a's won't load.
 // derived cache: games from finished months are kept per month, and thrown away if
 // either player's rev moves. only the current month is reread each time
-async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false } = {}) {
+async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false, full = false } = {}) {
   a = a?.toLowerCase();
   b = b?.toLowerCase();
   if (!a || !b || a === b) return null;
@@ -462,7 +460,8 @@ async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false 
   if (!monthsA) return null;
   // only months both played can have games between them. if b's list failed, check all of a's
   const bHas = monthsB ? new Set(monthsB) : null;
-  const shared = monthsA.filter((m) => !bHas || bHas.has(m));
+  // the last 60 days, or every month once "Load all games" has them in memory (full)
+  const shared = monthsA.filter((m) => (!bHas || bHas.has(m)) && (full || inWindow(m)));
   const current = utcMonth(Date.now());
 
   const key = `derived:h2h:${a}:${b}`;
@@ -497,7 +496,7 @@ async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false 
   // each other, so they're worked out on the whole month and filtered after
   const fresh = {};
   const keep = (month, vs, complete) => {
-    if (month < current && complete) cache.months[month] = vs;
+    if (month < current && complete && inWindow(month)) cache.months[month] = vs;
     else fresh[month] = vs;
   };
   for (const [month, m] of Object.entries(await withPreGame(a, monthsA, mineByMonth))) {
@@ -521,9 +520,7 @@ async function fetchHeadToHead(a, b, onProgress = () => {}, { cacheOnly = false 
   return result;
 }
 
-const GAMES_MAX_MONTHS = 6;
-
-// newest months first, at most 6, with pre-game numbers. needMore(gamesSoFar, month) says
+// the window's months, newest first, with pre-game numbers. needMore(gamesSoFar, month) says
 // whether to load an older one. cacheOnly: null if any month it needs was never loaded,
 // rather than a short list
 async function fetchPlayerGames(username, needMore, { cacheOnly = false } = {}) {
@@ -532,7 +529,7 @@ async function fetchPlayerGames(username, needMore, { cacheOnly = false } = {}) 
 
   const byMonth = {};
   let raw = [];
-  for (const month of [...months].reverse().slice(0, GAMES_MAX_MONTHS)) {
+  for (const month of months.filter((m) => inWindow(m)).reverse()) {
     const got = await fetchMonth(username, month, { cacheOnly });
     if (got === undefined) return null;
     // a month chess.com failed on stays out, so the next month doesn't think it had no games
@@ -556,7 +553,7 @@ async function fetchPlayerGames(username, needMore, { cacheOnly = false } = {}) 
 // { games: [] }, and last month is cached for good once it's over), plus, the first time
 // we see a page, every other month already in storage (no requests). returns the record or null
 async function findGameInArchive(username, page, { scanCached = false } = {}) {
-  const now = new Date();
+  const now = new Date(Date.now());
   const current = utcMonth(now.getTime());
   const previous = utcMonth(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
   for (const month of [current, previous]) {
@@ -606,7 +603,9 @@ async function latestHeadToHeadTimeClass(a, b, { cacheOnly = false } = {}) {
   return latest?.timeClass ?? null;
 }
 
-// every game a player has played in one time class, oldest first.
+// "Load all games": every game a player has played in one time class, oldest first.
+// months in the window go through storage as usual, older ones are downloaded into memory
+// (3 at a time, like every month request) and stay there until the page closes.
 // preGame: with myPre/oppPre (volatility, rust check, and the climb breakdown need them)
 async function fetchPlayerHistory(username, timeClass, onProgress = () => {}, { preGame = false } = {}) {
   const months = await fetchArchives(username);
@@ -638,15 +637,15 @@ async function fetchPlayerHistory(username, timeClass, onProgress = () => {}, { 
   return { games, missingMonths };
 }
 
-// one time class's games since sinceT, with pre-game numbers, from storage only (the race
-// view has loaded every month by then). for volatility and the rust check. null if a month
-// in that stretch was never loaded
+// one time class's stored games (the last 60 days) since sinceT, with pre-game numbers,
+// from storage only. for volatility and the shadow rating. null if a month in that stretch
+// was never loaded
 async function recentRecords(username, timeClass, sinceT) {
   const name = username.toLowerCase();
   const months = await fetchArchives(name, { cacheOnly: true });
   if (!months) return null;
   const fromMonth = utcMonth(sinceT * 1000);
-  const wanted = months.filter((m) => m >= fromMonth);
+  const wanted = months.filter((m) => m >= fromMonth && inWindow(m));
   const byMonth = {};
   for (const m of wanted) {
     const games = await fetchMonth(name, m, { cacheOnly: true });
@@ -662,17 +661,17 @@ async function recentRecords(username, timeClass, sinceT) {
 
 // how big loading a player's full history would be, before loading any of it.
 // chess.com sends ~4 KB per game (mostly the move list), measured on real months.
-// games per month come from the months already stored (overview keeps the newest 6),
-// so this makes no month requests: just the archives list and storage reads
+// games per month come from the months already stored (the last 60 days), so this makes
+// no month requests: just the archives list and storage reads
 const DOWNLOAD_BYTES_PER_GAME = 4000;
 
 async function estimateHistory(username) {
   const name = username.toLowerCase();
   const months = await fetchArchives(name);
   if (!months) return null;
-  const metas = await chrome.storage.local.get(months.map((m) => `monthMeta:${name}:${m}`));
-  const missing = months.filter((m) => !metas[`monthMeta:${name}:${m}`]);
-  const stored = months.filter((m) => !missing.includes(m)).slice(-6);
+  // to download: every month before the window that isn't already in memory
+  const missing = months.filter((m) => !inWindow(m) && !memoryMonths.has(`${name}:${m}`));
+  const stored = months.filter((m) => inWindow(m));
   const got = await chrome.storage.local.get(stored.map((m) => `month:${name}:${m}`));
   const counts = stored.map((m) => got[`month:${name}:${m}`]?.games.length ?? 0);
   // nothing stored to go by: assume a busy month rather than under-warn
@@ -681,77 +680,13 @@ async function estimateHistory(username) {
   return { name, months: months.length, missingMonths: missing.length, games, bytes: games * DOWNLOAD_BYTES_PER_GAME };
 }
 
-// a player's journey in one time class (race.js), kept as a derived cache:
-//   derived:journey:<name>:<timeClass> = { rev, through, state }
-// state = the fold as of the end of month `through`, the last finished month folded.
-// an update only adds the months after it, and the current month is added on a copy and
-// never saved (it's still changing). rev moving means everything is rebuilt
-async function fetchJourney(username, timeClass, { cacheOnly = false, onProgress = () => {} } = {}) {
-  const name = username.toLowerCase();
-  const months = await fetchArchives(name, { cacheOnly });
-  if (!months) return null;
-
-  const key = `derived:journey:${name}:${timeClass}`;
-  const rev = await getRevision(name);
-  let cache = (await chrome.storage.local.get(key))[key];
-  if (cache?.rev !== rev) cache = { rev, through: null, state: newJourneyState() };
-
-  const now = Date.now();
-  const current = utcMonth(now);
-  const finished = months.filter((m) => m < current && (cache.through == null || m > cache.through));
-
-  // load in parallel (3 at a time through inMonthSlot), fold in order
-  let done = 0;
-  const loaded = await Promise.all(
-    finished.map(async (m) => {
-      const games = await fetchMonth(name, m, { cacheOnly });
-      onProgress(++done, finished.length);
-      return games;
-    })
-  );
-  // from storage alone, a never-loaded month would quietly drop games from the journey
-  if (cacheOnly && loaded.includes(undefined)) return null;
-
-  const inOrder = (games) =>
-    games.filter((g) => g.timeClass === timeClass).sort((a, b) => a.t - b.t || a.id - b.id);
-  const state = cache.state;
-  let saved = null; // the state to save: up to the month before the first gap, if any
-  let through = cache.through;
-  const missingMonths = [];
-  for (let i = 0; i < finished.length; i++) {
-    if (!loaded[i]) {
-      // keep going for this answer, but don't save past a gap, so it's refolded once it loads
-      if (!saved) saved = { through, state: structuredClone(state) };
-      missingMonths.push(finished[i]);
-      continue;
-    }
-    for (const g of inOrder(loaded[i])) journeyStep(state, g);
-    if (!saved) through = finished[i];
-  }
-  if (finished.length) {
-    await chrome.storage.local.set({ [key]: { rev, ...(saved ?? { through, state }) } });
-  }
-
-  // the current month, on a copy
-  const withCurrent = structuredClone(state);
-  if (months.includes(current)) {
-    const games = await fetchMonth(name, current, { cacheOnly });
-    if (games === undefined && cacheOnly) return null;
-    for (const g of inOrder(games || [])) journeyStep(withCurrent, g);
-  }
-
-  const journey = finishJourney(withCurrent, now);
-  console.log(`[Performance] journey ${name} ${timeClass}: ${finished.length} new finished months folded, through ${through}`);
-  return { ...journey, missingMonths };
-}
-
 // node gets module.exports (for tests), the popup just gets globals from the script tag
 if (typeof module !== "undefined") {
   module.exports = {
     fetchJson, fetchArchives, fetchMonth, pickMonthsToRevalidate,
     revalidateFinishedMonths, getRevision, migrateStorage, fetchStats, playerMissing,
     tallyHeadToHead, flipSide, fetchHeadToHead, fetchPlayerGames, withPreGame, dataAsOf,
-    playersOfKey, pickPlayersToEvict, markViewed, evictStalePlayers, maintain, fetchJourney,
+    WINDOW_DAYS, windowStartMonth, inWindow, pruneOldMonths, maintain,
     estimateHistory, recentRecords,
     latestHeadToHeadTimeClass, fetchPlayerHistory, findGameInArchive, checkGameLock,
   };

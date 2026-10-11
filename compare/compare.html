@@ -1,7 +1,8 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>Performance</title>
+        <title>DualChess</title>
         <link rel="stylesheet" href="compare.css" />
     </head>
     <body>
@@ -39,8 +40,8 @@
                 <!-- when we last confirmed these numbers with chess.com -->
                 <p id="data-as-of" class="note"></p>
                 <h3>Data states</h3>
-                <!-- needs the full history -->
-                <div id="states"><p class="note">Needs the full history.</p></div>
+                <!-- needs the full history: "Load all games" -->
+                <div id="states"></div>
             </section>
 
             <section id="prediction-section">
@@ -55,7 +56,7 @@
                 <div id="h2h"></div>
             </section>
 
-            <!-- loading the full history: progress, and the question before a big download -->
+            <!-- "Load all games": progress, and the question before a big download -->
             <div id="history">
                 <p id="history-status" class="note"></p>
                 <div id="history-prompt" hidden>
@@ -100,12 +101,12 @@
 
             <section id="climb-section">
                 <h2>Climb breakdown</h2>
-                <div id="climb"><p class="note">Needs the full history.</p></div>
+                <div id="climb"></div>
             </section>
 
             <section id="shadow-section">
                 <h2>Shadow rating</h2>
-                <div id="shadow"><p class="note">Needs the full history.</p></div>
+                <div id="shadow"></div>
             </section>
 
             <section id="methodology-section">

@@ -155,18 +155,16 @@ const POPUP_RANGE = { range: "games:20", rated: "all" };
 // redraws when the words on screen changed. sync() is the only thing that makes requests,
 // and it calls render() once new data is saved.
 
-// the shadow needs the full history, which only the comparison tab downloads. read from
-// storage once per time class, and again only when the stored games change
+// the shadow over the last 30 days, replayed from the stored games (the last 60 days, so
+// there's a rated game before the 30 days to start from). read from storage once per time
+// class, and again only when the stored games change
+const SHADOW_DAYS = 30;
 let shadowMemo = { key: null, window: null };
 async function shadowWindowFromCache(username, timeClass, now) {
-  const key = `${username}:${timeClass}:${await getRevision(username)}`;
+  const key = `${username}:${timeClass}:${await getRevision(username)}:${await dataAsOf(username)}`;
   if (shadowMemo.key === key) return shadowMemo.window;
-  let window = null;
-  // null unless every finished month is stored
-  if (await fetchJourney(username, timeClass, { cacheOnly: true })) {
-    const records = await recentRecords(username, timeClass, 0);
-    if (records) window = shadowWindow(records, 90, now, calibrateK(records)?.K ?? 16);
-  }
+  const records = await recentRecords(username, timeClass, 0);
+  const window = records?.length ? shadowWindow(records, SHADOW_DAYS, now, calibrateK(records)?.K ?? 16) : null;
   shadowMemo = { key, window };
   return window;
 }
@@ -216,9 +214,9 @@ async function buildView() {
   view.me = {
     ...levelModel(null, primary, stats[primary], missing[primary], mePerf, now),
     // the strip's two numbers, the same ones a Compare strip gets
-    card: { official: mePerf?.official ?? null, current: mePerf?.perf == null ? null : { perf: mePerf.perf } },
+    card: { official: mePerf?.official ?? null, current: mePerf?.perf == null ? null : { perf: mePerf.perf, error: mePerf.error } },
     today: todayParts(mePerf?.session, now),
-    shadow: timeClass && stats[primary] ? shadowLine(await shadowWindowFromCache(primary, timeClass, now)) : null,
+    shadow: timeClass && stats[primary] ? shadowLine(await shadowWindowFromCache(primary, timeClass, now), SHADOW_DAYS) : null,
   };
   if (!pair) return view;
 
@@ -237,6 +235,8 @@ async function buildView() {
   const gap = h2h?.games.length ? matchupGap(h2h.games, now) : null;
   view.compare = compareSummary({ names, perfs, h2h, gap });
   view.names = names;
+  // the ± on each performance, in the same order
+  view.errors = perfs.map((p) => p?.error ?? null);
   return view;
 }
 
@@ -272,43 +272,53 @@ function renderLines(id, lines) {
   list.hidden = !lines.length;
 }
 
-// one strip: name over "Performance 2009", the official rating big on the right
+// one strip: the initial, the name over "Performance 2009 ± 85", the official rating big on
+// the right. current: { perf, error }, the ± left out when there isn't one
 function renderCard(container, name, official, current) {
   container.innerHTML = "";
-  const perf = el("div", null, "perf");
+  const perf = el("span");
   perf.append("Performance ", el("strong", current ? String(current.perf) : "—"));
+  if (Number.isFinite(current?.error)) perf.append(` ± ${Math.round(current.error)}`);
+  const who = el("div", null, "who");
+  who.append(el("b", name), perf);
   const off = el("div", null, "off");
-  off.append(el("b", official == null ? "—" : String(official)), el("small", "official"));
-  container.append(el("div", name, "nm"), perf, off);
+  off.append(el("span", official == null ? "—" : String(official)), el("small", "official"));
+  const av = el("span", name[0].toUpperCase(), "av");
+  av.setAttribute("aria-hidden", "true");
+  container.append(av, who, off);
 }
 
 // you (Me): the same strip as in Compare, or one line saying why there's nothing to show
 function renderLevel(container, m) {
   if (!m.problem) return renderCard(container, "You", m.card.official, m.card.current);
   container.innerHTML = "";
-  container.append(el("div", "You", "nm"), el("div", m.problem, "perf"));
+  const who = el("div", null, "who");
+  who.append(el("b", "You"), el("span", m.problem));
+  container.append(el("span", "Y", "av"), who);
 }
 
-// the eval bar: a segment's height is its percent. the number is left out of a segment
-// too short to hold it, and a segment at 0 isn't drawn
-const EVAL_LABEL_MIN = 12;
-function renderEval(chance, label) {
-  const bar = document.getElementById("eval");
-  bar.hidden = !chance;
-  if (!chance) return;
-  bar.setAttribute("aria-label", label);
-  for (const [id, value, labelled] of [["wbar-o", chance.loss, true], ["wbar-d", chance.draw, false], ["wbar-y", chance.win, true]]) {
+// the win bar: a segment's width is its percent, with the percent written in it. a segment
+// too narrow to hold its number goes without (the legend says it instead), and one at 0
+// isn't drawn
+const BAR_LABEL_MIN = 12;
+function renderWinBar(chance, names, label) {
+  document.getElementById("wbar").setAttribute("aria-label", label);
+  for (const [id, value, labelled] of [["wbar-y", chance.win, true], ["wbar-d", chance.draw, false], ["wbar-o", chance.loss, true]]) {
     const seg = document.getElementById(id);
     seg.hidden = !value;
     seg.style.flex = String(value);
-    seg.textContent = labelled && value >= EVAL_LABEL_MIN ? String(value) : "";
+    seg.textContent = labelled && value >= BAR_LABEL_MIN ? `${value}%` : "";
   }
+  const legend = (name, value) => (value >= BAR_LABEL_MIN ? name : `${name} ${value}%`);
+  document.getElementById("win-y-name").textContent = legend(names[0], chance.win);
+  document.getElementById("win-d").textContent = `${chance.draw}%`;
+  document.getElementById("win-o-name").textContent = legend(names[1], chance.loss);
 }
 
-// parts where every odd one is bold: ["You play at ", "1790", " vs ", "1654", " (±100)"]
-function fillParts(node, parts) {
+// a tile: what it is, the figure big, a line under it
+function renderTile(node, label, value, sub) {
   node.innerHTML = "";
-  parts.forEach((text, i) => node.append(i % 2 ? el("b", text) : text));
+  node.append(el("span", label), el("b", value), el("span", sub));
 }
 
 // final = sync has run, so missing numbers are real failures, not "still loading".
@@ -332,7 +342,10 @@ async function render({ final = false } = {}) {
   const tc = view.timeClass;
   document.querySelector('#ctl-time option[value="auto"]').textContent = tc ? `Auto · ${tc[0].toUpperCase()}${tc.slice(1)}` : "Auto";
   document.getElementById("ctl-time").title = view.autoText;
-  document.getElementById("updated").textContent = view.updated;
+  // "Updated" and the time as two pieces, so a narrow header breaks between them
+  const updated = document.getElementById("updated");
+  updated.innerHTML = "";
+  if (view.updated) updated.append("Updated ", el("span", view.updated.replace(/^Updated /, "")));
   current.timeClass = view.timeClass;
 
   // Me
@@ -346,26 +359,26 @@ async function render({ final = false } = {}) {
   // Compare
   if (view.compare) {
     const c = view.compare;
-    view.names.forEach((name, i) => renderCard(document.getElementById(`card-${i}`), name, c.official[i], c.current[i]));
+    view.names.forEach((name, i) =>
+      renderCard(document.getElementById(`card-${i}`), name, c.official[i], c.current[i] && { ...c.current[i], error: view.errors[i] })
+    );
     setLine("cmp-problem", view.problems.join(" "));
     document.getElementById("against").hidden = !c.against;
     if (c.against) {
       document.getElementById("against-title").textContent = c.against.title;
+      // the same words as before, split over a tile: "You play at" / "1790 vs 1654" / "±100"
       const levels = document.getElementById("against-levels");
       levels.hidden = !c.against.levels;
-      if (c.against.levels) fillParts(levels, c.against.levels);
-      fillParts(document.getElementById("against-scored"), c.against.scored);
+      if (c.against.levels) {
+        const [label, a, vs, b, error] = c.against.levels;
+        renderTile(levels, label.trim(), a + vs + b, error.trim().replace(/[()]/g, ""));
+      }
+      const [label, scored, expected] = c.against.scored;
+      renderTile(document.getElementById("against-scored"), label.trim(), scored, expected.replace(" · ", ""));
     }
     const ch = c.chance;
     document.getElementById("win").hidden = !ch;
-    renderEval(ch, c.win);
-    if (ch) {
-      document.getElementById("win-y-name").textContent = view.names[0];
-      document.getElementById("win-o-name").textContent = view.names[1];
-      document.getElementById("win-y").textContent = `${ch.win}%`;
-      document.getElementById("win-d").textContent = `${ch.draw}%`;
-      document.getElementById("win-o").textContent = `${ch.loss}%`;
-    }
+    if (ch) renderWinBar(ch, view.names, c.win);
     document.getElementById("based-on").textContent = c.basedOn;
     document.getElementById("open-compare").hidden = !view.timeClass;
   }
@@ -377,7 +390,7 @@ async function render({ final = false } = {}) {
 let syncGen = 0;
 
 // the only place that asks chess.com for anything (besides the fair play check): /stats,
-// the newest 6 months of each player, and the h2h months. mostly 304s after the first time.
+// and each player's months in the last 60 days (the h2h is read from the same ones). mostly 304s after the first time.
 // the comparison tab reads all of it from storage
 async function sync() {
   if (!current) return;
@@ -418,7 +431,9 @@ async function sync() {
     document.body.classList.remove("is-loading");
   }
 
-  // a stale sync returned above, so only the newest one schedules the next
+  // a stale sync returned above, so only the newest one prunes and schedules the next.
+  // a month can slide out of the 60-day window while the popup stays open
+  await pruneOldMonths().catch((err) => console.warn("[Performance] prune failed:", err));
   refreshDelay = ok ? REFRESH_MS : Math.min(refreshDelay * 2, MAX_BACKOFF_MS);
   if (!ok) console.warn(`[Performance] sync had failures, next one in ${refreshDelay / 1000}s`);
   refreshTimer = setTimeout(() => sync(), refreshDelay);
@@ -475,6 +490,8 @@ async function init() {
   try {
     // once: drop the old per-feature caches, months live in one store now
     await migrateStorage();
+    // every open: months that ended before the 60-day cutoff go
+    await pruneOldMonths();
 
     const tabData = await getActiveChessTabData();
     if (gen !== initGen) return;
@@ -528,17 +545,14 @@ async function init() {
     showView(pair ? "compare" : "me");
     main.hidden = false;
 
-    // anyone shown keeps their stored data for another 30 days
-    await markViewed([primaryUsername, ...entries.map((e) => e.username)]);
-
     // cached numbers first, instantly. then check chess.com for anything new
     if (!(await render())) statusEl.textContent = "Loading recent games…";
     await sync();
 
-    // upkeep, last so it never holds anything up: old players out, a few old months rechecked.
+    // upkeep, last so it never holds anything up: a few finished months rechecked.
     // if a recheck found a corrected month for someone on screen, show the new numbers
     if (gen !== initGen) return;
-    const { changed } = await maintain(primaryUsername);
+    const { changed } = await maintain();
     if (gen === initGen && changed.some((n) => n === primaryUsername || entries.some((e) => e.username === n))) {
       await render({ final: true });
     }
